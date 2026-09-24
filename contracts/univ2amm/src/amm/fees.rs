@@ -1,8 +1,9 @@
-use miden::{AccountId, Felt, Word, WordValue};
+use miden::{AccountId, Felt, Word, WordValue, export_type};
 
+#[export_type]
 pub struct Fees {
-    fee_bps: u32,
-    fee_to: AccountId,
+    pub fee_bps: u32,
+    pub fee_to: AccountId,
 }
 
 impl Fees {

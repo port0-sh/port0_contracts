@@ -4,9 +4,24 @@ use crate::error::ConversionError;
 
 #[export_type]
 pub struct Reserves {
-    reserve0: u64,
-    reserve1: u64,
-    lp_supply: u64,
+    pub reserve0: u64,
+    pub reserve1: u64,
+    pub lp_supply: u64,
+}
+
+impl Reserves {
+    pub fn k(&self) -> u128 {
+        self.reserve0 as u128 * self.reserve1 as u128
+    }
+    pub fn reserve0(&self) -> u64 {
+        self.reserve0
+    }
+    pub fn reserve1(&self) -> u64 {
+        self.reserve1
+    }
+    pub fn lp_supply(&self) -> u64 {
+        self.lp_supply
+    }
 }
 
 impl WordValue for Reserves {

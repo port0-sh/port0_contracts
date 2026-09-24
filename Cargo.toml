@@ -1,11 +1,14 @@
 [workspace]
-members = [
-    "integration"
-, "contracts/univ2amm"]
-exclude = [
-    "contracts/",
-]
 resolver = "2"
+members = [
+  "contracts/lp-faucet",
+  "contracts/mint-note",
+  "contracts/univ2amm",
+  "integration"
+]
+exclude = [
+  "contracts/",
+]
 
 [workspace.package]
 edition = "2021"

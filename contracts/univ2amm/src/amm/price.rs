@@ -1,4 +1,4 @@
-use miden::{AccountId, Word, WordValue};
+use miden::{Word, WordValue};
 
 use crate::utils::u128::{u128_to_word, word_to_u128};
 
@@ -11,6 +11,8 @@ impl WordValue for KLast {
         Ok(u128_to_word(self.k_last))
     }
     fn try_from_word(word: Word) -> Result<Self, &'static str> {
-        Ok(word_to_u128(word))
+        Ok(KLast {
+            k_last: word_to_u128(word),
+        })
     }
 }
