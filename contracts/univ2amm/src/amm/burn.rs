@@ -1,4 +1,8 @@
-use crate::{amm::MINIMUM_LIQUIDITY, error::PoolMathError, utils::math::MAX_AMOUNT};
+use crate::{
+    amm::{MINIMUM_LIQUIDITY, reserves::Reserves},
+    error::PoolMathError,
+    utils::math::MAX_AMOUNT,
+};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct BurnQuote {
@@ -9,12 +13,12 @@ pub struct BurnQuote {
     pub reserve1_after: u64,
 }
 
-pub fn quote_burn(
-    liquidity: u64,
-    reserve0: u64,
-    reserve1: u64,
-    lp_supply: u64,
-) -> Result<BurnQuote, PoolMathError> {
+pub fn quote_burn(liquidity: u64, reserves: Reserves) -> Result<BurnQuote, PoolMathError> {
+    let Reserves {
+        reserve0,
+        reserve1,
+        lp_supply,
+    } = reserves;
     if liquidity == 0 {
         return Err(PoolMathError::ZeroAmountIn);
     }

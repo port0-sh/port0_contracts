@@ -9,11 +9,13 @@ pub mod error;
 pub mod utils;
 
 use miden::{
-    AccountId, Asset, Felt, NoteIdx, NoteType, StorageValue, Tag, Word, active_note, component,
-    component_storage, input_note, native_account::NativeAccount, note, output_note,
+    AccountId, Asset, Felt, NoteIdx, NoteType, StorageValue, Tag, Word, active_account,
+    active_note, component, component_storage, native_account::NativeAccount, note, output_note,
 };
 
-use crate::amm::{fees::Fees, mint::quote_mint, reserves::Reserves, token::Tokens};
+use crate::amm::{
+    burn::quote_burn, fees::Fees, mint::quote_mint, reserves::Reserves, token::Tokens,
+};
 
 #[component_storage]
 struct Univ2ammStorage {
@@ -25,6 +27,8 @@ struct Univ2ammStorage {
     fees: StorageValue<Fees>,
     #[storage(description = "AccountId that is permitted to make admin changes")]
     admin: StorageValue<AccountId>,
+    #[storage(description = "P2ID root")]
+    p2id_root: StorageValue<Word>,
 }
 
 #[component(lp_faucet::LpFaucet)]
@@ -40,29 +44,38 @@ trait Univ2amm: NativeAccount + LpFaucet {
     #[account_procedure]
     fn mint(
         &mut self,
-        lp: Asset,
+        min_lp_out: u64,
         recipient: AccountId,
         serial_num: Word,
         tag: Felt,
         note_type: Felt,
-        script_root: Word,
     );
     #[account_procedure]
-    fn burn(&mut self) -> Felt;
+    fn burn(
+        &mut self,
+        min_token0_out: u64,
+        min_token1_out: u64,
+        recipient: AccountId,
+        serial_num: Word,
+        tag: Felt,
+        note_type: Felt,
+    );
     #[account_procedure]
-    fn swap(&mut self) -> Felt;
+    fn swap(&mut self);
 }
 
 impl Univ2ammStorage {
-    fn send(
+    fn add_asset_to_output_note(&mut self, asset: Asset, note_idx: NoteIdx) {
+        output_note::add_asset(asset, note_idx);
+    }
+    fn prepare_output_note(
         &mut self,
-        asset: Asset,
         recipient: AccountId,
         serial_num: Word,
         tag: Felt,
         note_type: Felt,
         script_root: Word,
-    ) {
+    ) -> NoteIdx {
         let note_recipient = note::build_recipient(
             serial_num,
             script_root,
@@ -70,7 +83,7 @@ impl Univ2ammStorage {
         );
         let note_idx =
             output_note::create(Tag::from(tag), NoteType::from(note_type), note_recipient);
-        output_note::add_asset(asset, note_idx);
+        note_idx
     }
 }
 
@@ -90,31 +103,126 @@ impl Univ2amm for Univ2ammStorage {
     }
     fn mint(
         &mut self,
-        lp_token: Asset,
+        min_lp_out: u64,
         recipient: AccountId,
         serial_num: Word,
         tag: Felt,
         note_type: Felt,
-        script_root: Word,
-    ) -> Felt {
+    ) {
+        let mut amount0 = 0u64;
+        let mut amount1 = 0u64;
         for asset in active_note::get_initial_assets() {
+            assert!(
+                asset.is_fungible(),
+                "Mint note contains non-fungible tokens"
+            );
+            let account_id = AccountId::new(asset.key[3], asset.key[2]);
+            if account_id.eq(&self.token0()) {
+                amount0 = asset.value[0].as_canonical_u64();
+            } else if account_id.eq(&self.token1()) {
+                amount1 = asset.value[0].as_canonical_u64();
+            } else {
+                panic!("Mint note has an asset that is neither token0 nor token1");
+            }
             self.add_asset(asset);
         }
-        let quote = quote_mint(0, 0, self.reserves.get()).unwrap();
-        self.issue(quote.liquidity_to_user);
-        self.send(
-            quote.liquidity_to_user,
-            recipient,
-            serial_num,
-            tag,
-            note_type,
-            script_root,
+        let quote = quote_mint(amount0, amount1, self.reserves.get()).unwrap();
+        assert!(
+            min_lp_out >= quote.liquidity_to_user,
+            "LP out would be less than desired"
         );
+        let account_id = active_account::get_id();
+        let lp_key = Word::from([Felt::ZERO, Felt::ZERO, account_id.suffix, account_id.prefix]);
+        let lp_asset = Asset::new(
+            lp_key,
+            Word::from([
+                Felt::new_unchecked(quote.liquidity_to_user),
+                Felt::ZERO,
+                Felt::ZERO,
+                Felt::ZERO,
+            ]),
+        );
+        let lp_asset = self.issue(lp_asset);
+        let note_idx =
+            self.prepare_output_note(recipient, serial_num, tag, note_type, self.p2id_root.get());
+        self.add_asset_to_output_note(lp_asset, note_idx);
+        self.reserves.set(Reserves {
+            reserve0: quote.reserve0_after,
+            reserve1: quote.reserve1_after,
+            lp_supply: quote.lp_supply_after,
+        });
     }
-    fn burn(&mut self) -> Felt {
-        Felt::ZERO
+    fn burn(
+        &mut self,
+        min_amount0_out: u64,
+        min_amount1_out: u64,
+        recipient: AccountId,
+        serial_num: Word,
+        tag: Felt,
+        note_type: Felt,
+    ) {
+        let mut amount = 0u64;
+        for asset in active_note::get_initial_assets() {
+            assert!(
+                asset.is_fungible(),
+                "Burn note contains non-fungible tokens"
+            );
+            let account_id = AccountId::new(asset.key[3], asset.key[2]);
+            if account_id.eq(&active_account::get_id()) {
+                amount = asset.value[0].as_canonical_u64();
+            } else {
+                panic!("Burn note has an asset that is not the LP token");
+            }
+            self.add_asset(asset);
+        }
+        let quote = quote_burn(amount, self.reserves.get()).unwrap();
+        assert!(
+            min_amount0_out >= quote.amount0,
+            "Amount of token0 out would be less than desired"
+        );
+        assert!(
+            min_amount1_out >= quote.amount1,
+            "Amount of token1 out would be less than desired"
+        );
+        let token0_key = Word::from([
+            Felt::ZERO,
+            Felt::ZERO,
+            self.token0().suffix,
+            self.token0().prefix,
+        ]);
+        let token1_key = Word::from([
+            Felt::ZERO,
+            Felt::ZERO,
+            self.token1().suffix,
+            self.token1().prefix,
+        ]);
+        let asset0 = Asset::new(
+            token0_key,
+            Word::from([
+                Felt::new_unchecked(quote.amount0),
+                Felt::ZERO,
+                Felt::ZERO,
+                Felt::ZERO,
+            ]),
+        );
+        let asset1 = Asset::new(
+            token1_key,
+            Word::from([
+                Felt::new_unchecked(quote.amount1),
+                Felt::ZERO,
+                Felt::ZERO,
+                Felt::ZERO,
+            ]),
+        );
+        let note_idx =
+            self.prepare_output_note(recipient, serial_num, tag, note_type, self.p2id_root.get());
+        self.add_asset_to_output_note(asset0, note_idx);
+        self.add_asset_to_output_note(asset1, note_idx);
+        self.reserves.set(Reserves {
+            reserve0: quote.reserve0_after,
+            reserve1: quote.reserve1_after,
+            lp_supply: quote.lp_supply_after,
+        });
     }
-    fn swap(&mut self) -> Felt {
-        Felt::ZERO
-    }
+    fn swap(&mut self) {}
 }
