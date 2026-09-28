@@ -14,7 +14,8 @@ use miden::{
 };
 
 use crate::amm::{
-    burn::quote_burn, fees::Fees, mint::quote_mint, reserves::Reserves, token::Tokens,
+    burn::quote_burn, fees::Fees, mint::quote_mint, reserves::Reserves, swap::amount_out,
+    token::Tokens,
 };
 
 #[component_storage]
@@ -61,7 +62,14 @@ trait Univ2amm: NativeAccount + LpFaucet {
         note_type: Felt,
     );
     #[account_procedure]
-    fn swap(&mut self);
+    fn swap(
+        &mut self,
+        min_amount_out: u64,
+        recipient: AccountId,
+        serial_num: Word,
+        tag: Felt,
+        note_type: Felt,
+    );
 }
 
 impl Univ2ammStorage {
@@ -109,8 +117,8 @@ impl Univ2amm for Univ2ammStorage {
         tag: Felt,
         note_type: Felt,
     ) {
-        let mut amount0 = 0u64;
-        let mut amount1 = 0u64;
+        let mut amount0_in_note = 0u64;
+        let mut amount1_in_note = 0u64;
         for asset in active_note::get_initial_assets() {
             assert!(
                 asset.is_fungible(),
@@ -118,15 +126,15 @@ impl Univ2amm for Univ2ammStorage {
             );
             let account_id = AccountId::new(asset.key[3], asset.key[2]);
             if account_id.eq(&self.token0()) {
-                amount0 = asset.value[0].as_canonical_u64();
+                amount0_in_note = asset.value[0].as_canonical_u64();
             } else if account_id.eq(&self.token1()) {
-                amount1 = asset.value[0].as_canonical_u64();
+                amount1_in_note = asset.value[0].as_canonical_u64();
             } else {
                 panic!("Mint note has an asset that is neither token0 nor token1");
             }
             self.add_asset(asset);
         }
-        let quote = quote_mint(amount0, amount1, self.reserves.get()).unwrap();
+        let quote = quote_mint(amount0_in_note, amount1_in_note, self.reserves.get()).unwrap();
         assert!(
             min_lp_out >= quote.liquidity_to_user,
             "LP out would be less than desired"
@@ -161,21 +169,21 @@ impl Univ2amm for Univ2ammStorage {
         tag: Felt,
         note_type: Felt,
     ) {
-        let mut amount = 0u64;
-        for asset in active_note::get_initial_assets() {
-            assert!(
-                asset.is_fungible(),
-                "Burn note contains non-fungible tokens"
-            );
-            let account_id = AccountId::new(asset.key[3], asset.key[2]);
-            if account_id.eq(&active_account::get_id()) {
-                amount = asset.value[0].as_canonical_u64();
-            } else {
-                panic!("Burn note has an asset that is not the LP token");
-            }
-            self.add_asset(asset);
-        }
-        let quote = quote_burn(amount, self.reserves.get()).unwrap();
+        let assets = active_note::get_initial_assets();
+        assert!(assets.len() == 1, "Burn note should contain only one asset");
+        let asset = assets[0];
+        assert!(
+            asset.is_fungible(),
+            "Burn note contains a non-fungible token"
+        );
+        let account_id = AccountId::new(asset.key[3], asset.key[2]);
+        assert!(
+            account_id.eq(&active_account::get_id()),
+            "Burn note has an asset that is not the LP token"
+        );
+        let amount_in_note = asset.value[0].as_canonical_u64();
+        self.add_asset(asset);
+        let quote = quote_burn(amount_in_note, self.reserves.get()).unwrap();
         assert!(
             min_amount0_out >= quote.amount0,
             "Amount of token0 out would be less than desired"
@@ -224,5 +232,71 @@ impl Univ2amm for Univ2ammStorage {
             lp_supply: quote.lp_supply_after,
         });
     }
-    fn swap(&mut self) {}
+    fn swap(
+        &mut self,
+        min_amount_out: u64,
+        recipient: AccountId,
+        serial_num: Word,
+        tag: Felt,
+        note_type: Felt,
+    ) {
+        let assets = active_note::get_initial_assets();
+        assert!(assets.len() == 1, "Swap note should contain only one asset");
+        let asset = assets[0];
+        assert!(
+            asset.is_fungible(),
+            "Swap note contains a non-fungible token"
+        );
+        let token_id_in = AccountId::new(asset.key[3], asset.key[2]);
+        let reserves = self.reserves.get();
+        let (token_in, token_out, reserve_in, reserve_out) = if token_id_in.eq(&self.token0()) {
+            (
+                self.token0(),
+                self.token1(),
+                reserves.reserve0(),
+                reserves.reserve1(),
+            )
+        } else if token_id_in.eq(&self.token1()) {
+            (
+                self.token1(),
+                self.token0(),
+                reserves.reserve1(),
+                reserves.reserve0(),
+            )
+        } else {
+            panic!("Swap note has an asset that is neither token0 nor token1");
+        };
+        let amount_in = asset.value[0].as_canonical_u64();
+        let quote =
+            amount_out(amount_in, reserve_in, reserve_out, self.fees.get().fee_bps).unwrap();
+        assert!(
+            min_amount_out >= quote.amount_out,
+            "Amount out would be less than desired"
+        );
+        let token_out_key =
+            Word::from([Felt::ZERO, Felt::ZERO, token_out.suffix, token_out.prefix]);
+        let asset_out = Asset::new(
+            token_out_key,
+            Word::from([
+                Felt::new_unchecked(quote.amount_out),
+                Felt::ZERO,
+                Felt::ZERO,
+                Felt::ZERO,
+            ]),
+        );
+        let note_idx =
+            self.prepare_output_note(recipient, serial_num, tag, note_type, self.p2id_root.get());
+        self.add_asset_to_output_note(asset_out, note_idx);
+        self.add_asset(asset);
+        let (reserve0_after, reserve1_after) = if token_in.eq(&self.token0()) {
+            (quote.reserve_in_after, quote.reserve_out_after)
+        } else {
+            (quote.reserve_out_after, quote.reserve_in_after)
+        };
+        self.reserves.set(Reserves {
+            reserve0: reserve0_after,
+            reserve1: reserve1_after,
+            lp_supply: reserves.lp_supply,
+        });
+    }
 }

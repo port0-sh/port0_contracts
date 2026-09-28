@@ -11,8 +11,7 @@ pub fn amount_out(
     amount_in: u64,
     reserve_in: u64,
     reserve_out: u64,
-    fee_numerator: u128,
-    fee_denominator: u128,
+    fee_bps: u32,
 ) -> Result<SwapQuote, PoolMathError> {
     if amount_in == 0 {
         return Err(PoolMathError::ZeroAmountIn);
@@ -23,7 +22,8 @@ pub fn amount_out(
     if amount_in > MAX_AMOUNT || reserve_in > MAX_AMOUNT || reserve_out > MAX_AMOUNT {
         return Err(PoolMathError::Overflow);
     }
-    let amount_in_with_fee = amount_in as u128 * fee_numerator;
+    let fee_denominator = 10000;
+    let amount_in_with_fee = amount_in as u128 * fee_bps as u128;
     let numerator = amount_in_with_fee
         .checked_mul(reserve_out as u128)
         .ok_or(PoolMathError::Overflow)?;
