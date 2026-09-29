@@ -10,7 +10,9 @@ pub mod utils;
 
 use miden::{
     AccountId, Asset, Felt, NoteIdx, NoteType, StorageValue, Tag, Word, active_account,
-    active_note, component, component_storage, native_account::NativeAccount, note, output_note,
+    active_note, component, component_storage,
+    native_account::{self, NativeAccount},
+    note, output_note,
 };
 
 use crate::amm::{
@@ -45,35 +47,36 @@ trait Univ2amm: NativeAccount + LpFaucet {
     #[account_procedure]
     fn mint(
         &mut self,
-        min_lp_out: u64,
         recipient: AccountId,
         serial_num: Word,
         tag: Felt,
         note_type: Felt,
+        min_lp_out: u64,
     );
     #[account_procedure]
     fn burn(
         &mut self,
-        min_token0_out: u64,
-        min_token1_out: u64,
         recipient: AccountId,
         serial_num: Word,
         tag: Felt,
         note_type: Felt,
+        min_token0_out: u64,
+        min_token1_out: u64,
     );
     #[account_procedure]
     fn swap(
         &mut self,
-        min_amount_out: u64,
         recipient: AccountId,
         serial_num: Word,
         tag: Felt,
         note_type: Felt,
+        min_amount_out: u64,
     );
 }
 
 impl Univ2ammStorage {
     fn add_asset_to_output_note(&mut self, asset: Asset, note_idx: NoteIdx) {
+        native_account::remove_asset(asset);
         output_note::add_asset(asset, note_idx);
     }
     fn prepare_output_note(
@@ -111,11 +114,11 @@ impl Univ2amm for Univ2ammStorage {
     }
     fn mint(
         &mut self,
-        min_lp_out: u64,
         recipient: AccountId,
         serial_num: Word,
         tag: Felt,
         note_type: Felt,
+        min_lp_out: u64,
     ) {
         let mut amount0_in_note = 0u64;
         let mut amount1_in_note = 0u64;
@@ -136,7 +139,7 @@ impl Univ2amm for Univ2ammStorage {
         }
         let quote = quote_mint(amount0_in_note, amount1_in_note, self.reserves.get()).unwrap();
         assert!(
-            min_lp_out >= quote.liquidity_to_user,
+            quote.liquidity_to_user >= min_lp_out,
             "LP out would be less than desired"
         );
         let account_id = active_account::get_id();
@@ -162,12 +165,12 @@ impl Univ2amm for Univ2ammStorage {
     }
     fn burn(
         &mut self,
-        min_amount0_out: u64,
-        min_amount1_out: u64,
         recipient: AccountId,
         serial_num: Word,
         tag: Felt,
         note_type: Felt,
+        min_amount0_out: u64,
+        min_amount1_out: u64,
     ) {
         let assets = active_note::get_initial_assets();
         assert!(assets.len() == 1, "Burn note should contain only one asset");
@@ -185,11 +188,11 @@ impl Univ2amm for Univ2ammStorage {
         self.add_asset(asset);
         let quote = quote_burn(amount_in_note, self.reserves.get()).unwrap();
         assert!(
-            min_amount0_out >= quote.amount0,
+            quote.amount0 >= min_amount0_out,
             "Amount of token0 out would be less than desired"
         );
         assert!(
-            min_amount1_out >= quote.amount1,
+            quote.amount1 >= min_amount1_out,
             "Amount of token1 out would be less than desired"
         );
         let token0_key = Word::from([
@@ -226,6 +229,7 @@ impl Univ2amm for Univ2ammStorage {
             self.prepare_output_note(recipient, serial_num, tag, note_type, self.p2id_root.get());
         self.add_asset_to_output_note(asset0, note_idx);
         self.add_asset_to_output_note(asset1, note_idx);
+        self.redeem(asset);
         self.reserves.set(Reserves {
             reserve0: quote.reserve0_after,
             reserve1: quote.reserve1_after,
@@ -234,11 +238,11 @@ impl Univ2amm for Univ2ammStorage {
     }
     fn swap(
         &mut self,
-        min_amount_out: u64,
         recipient: AccountId,
         serial_num: Word,
         tag: Felt,
         note_type: Felt,
+        min_amount_out: u64,
     ) {
         let assets = active_note::get_initial_assets();
         assert!(assets.len() == 1, "Swap note should contain only one asset");
@@ -270,7 +274,7 @@ impl Univ2amm for Univ2ammStorage {
         let quote =
             amount_out(amount_in, reserve_in, reserve_out, self.fees.get().fee_bps).unwrap();
         assert!(
-            min_amount_out >= quote.amount_out,
+            quote.amount_out >= min_amount_out,
             "Amount out would be less than desired"
         );
         let token_out_key =

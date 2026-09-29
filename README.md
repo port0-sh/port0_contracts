@@ -1,6 +1,6 @@
-# Miden Project
+# Miden Constant Product Pool
 
-A workspace structure for building Miden smart contract applications.
+This repo contains a Miden Rust implementation of UniSwap V2 constant product pool.
 
 ## **Installation**
 

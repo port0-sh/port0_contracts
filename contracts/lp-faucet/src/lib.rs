@@ -11,9 +11,7 @@ struct LpFaucetStorage {
 
 #[component]
 trait LpFaucet {
-    #[account_procedure]
     fn issue(&mut self, asset: Asset) -> Asset;
-    #[account_procedure]
     fn redeem(&mut self, asset: Asset);
     #[account_procedure]
     fn get_supply(&self) -> Felt;
@@ -40,7 +38,6 @@ impl LpFaucet for LpFaucetStorage {
         let amount = asset.value[0].as_canonical_u64();
         let current = self.supply.get()[0].as_canonical_u64();
         assert!(current >= amount, "burn exceeds LP supply");
-        // LP must already be in this transaction (the burn note).
         faucet::burn(asset);
         let next = current - amount;
         self.supply.set(Word::from([

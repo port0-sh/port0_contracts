@@ -14,6 +14,7 @@ impl Fees {
         self.fee_to
     }
     pub fn set_fee_bps(&mut self, fee_bps: u32) {
+        assert!(fee_bps < 10000, "Fee bps must be less than 10000");
         self.fee_bps = fee_bps
     }
     pub fn set_fee_to(&mut self, fee_to: AccountId) {
