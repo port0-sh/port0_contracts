@@ -23,11 +23,12 @@ pub fn amount_out(
         return Err(PoolMathError::Overflow);
     }
     let fee_denominator = 10000;
-    let amount_in_with_fee = amount_in as u128 * fee_bps as u128;
+    let weight = fee_denominator - fee_bps;
+    let amount_in_with_fee = amount_in as u128 * weight as u128;
+    let denominator = reserve_in as u128 * fee_denominator as u128 + amount_in_with_fee;
     let numerator = amount_in_with_fee
         .checked_mul(reserve_out as u128)
         .ok_or(PoolMathError::Overflow)?;
-    let denominator = reserve_in as u128 * fee_denominator + amount_in_with_fee;
     let out = numerator / denominator;
     if out == 0 {
         return Err(PoolMathError::ZeroAmountOut);

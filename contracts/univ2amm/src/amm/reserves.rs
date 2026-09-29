@@ -29,7 +29,7 @@ impl WordValue for Reserves {
         Ok(Word::from([
             Felt::try_from(self.reserve0).map_err(|_| ConversionError::U64ToFelt.to_string())?,
             Felt::try_from(self.reserve1).map_err(|_| ConversionError::U64ToFelt.to_string())?,
-            Felt::ZERO,
+            Felt::try_from(self.lp_supply).map_err(|_| ConversionError::U64ToFelt.to_string())?,
             Felt::ZERO,
         ]))
     }

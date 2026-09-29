@@ -18,6 +18,7 @@ pub fn quote_mint(
     reserves: Reserves,
 ) -> Result<MintQuote, PoolMathError> {
     let lp_supply = reserves.lp_supply();
+
     if amount0 == 0 || amount1 == 0 {
         return Err(PoolMathError::ZeroAmountIn);
     }
@@ -32,7 +33,7 @@ pub fn quote_mint(
         if reserve0 != 0 || reserve1 != 0 {
             return Err(PoolMathError::Invariant);
         }
-        let root = isqrt(reserves.k());
+        let root = isqrt(reserve0_after as u128 * reserve1_after as u128 /* k */);
         if root <= MINIMUM_LIQUIDITY {
             return Err(PoolMathError::InsufficientLiquidity);
         }
