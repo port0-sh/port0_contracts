@@ -13,6 +13,11 @@ struct SwapNoteNote;
 impl SwapNoteNote {
     #[note_script]
     pub fn run(self, _arg: Word, account: &mut NativeAccount) {
+        if active_note::get_sender().eq(&active_account::get_id()) {
+            for asset in active_note::get_initial_assets() {
+                native_account::add_asset(asset);
+            }
+        }
         let storage = active_note::get_storage();
         let pool_id = AccountId::new(storage[0], storage[1]);
         assert!(
