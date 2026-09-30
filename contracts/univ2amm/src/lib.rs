@@ -76,7 +76,6 @@ trait Univ2amm: NativeAccount + LpFaucet {
 
 impl Univ2ammStorage {
     fn add_asset_to_output_note(&mut self, asset: Asset, note_idx: NoteIdx) {
-        native_account::remove_asset(asset);
         output_note::add_asset(asset, note_idx);
     }
     fn prepare_output_note(
@@ -135,6 +134,7 @@ impl Univ2amm for Univ2ammStorage {
             } else {
                 panic!("Mint note has an asset that is neither token0 nor token1");
             }
+            native_account::remove_asset(asset);
             self.add_asset(asset);
         }
         let quote = quote_mint(amount0_in_note, amount1_in_note, self.reserves.get()).unwrap();
@@ -185,7 +185,6 @@ impl Univ2amm for Univ2ammStorage {
             "Burn note has an asset that is not the LP token"
         );
         let amount_in_note = asset.value[0].as_canonical_u64();
-        self.add_asset(asset);
         let quote = quote_burn(amount_in_note, self.reserves.get()).unwrap();
         assert!(
             quote.amount0 >= min_amount0_out,
@@ -229,6 +228,8 @@ impl Univ2amm for Univ2ammStorage {
             self.prepare_output_note(recipient, serial_num, tag, note_type, self.p2id_root.get());
         self.add_asset_to_output_note(asset0, note_idx);
         self.add_asset_to_output_note(asset1, note_idx);
+        native_account::remove_asset(asset0);
+        native_account::remove_asset(asset1);
         self.redeem(asset);
         self.reserves.set(Reserves {
             reserve0: quote.reserve0_after,
@@ -290,6 +291,7 @@ impl Univ2amm for Univ2ammStorage {
         );
         let note_idx =
             self.prepare_output_note(recipient, serial_num, tag, note_type, self.p2id_root.get());
+        native_account::remove_asset(asset);
         self.add_asset_to_output_note(asset_out, note_idx);
         self.add_asset(asset);
         let (reserve0_after, reserve1_after) = if token_in.eq(&self.token0()) {

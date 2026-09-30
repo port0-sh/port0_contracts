@@ -1,7 +1,9 @@
 #![no_std]
 #![feature(alloc_error_handler)]
 
-use miden::{Asset, Felt, StorageValue, Word, component, component_storage, faucet};
+use miden::{
+    Asset, Felt, StorageValue, Word, component, component_storage, faucet, native_account,
+};
 
 #[component_storage]
 struct LpFaucetStorage {
