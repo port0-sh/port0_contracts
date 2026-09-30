@@ -20,7 +20,7 @@ use crate::{
         burn::quote_burn, fees::Fees, mint::quote_mint, reserves::Reserves, swap::amount_out,
         token::Tokens,
     },
-    utils::asset::{compose_asset, get_asset_key_from_faucet_id},
+    utils::asset::{compose_asset, get_account_id_from_asset_key, get_asset_key_from_faucet_id},
 };
 
 #[component_storage]
@@ -131,7 +131,7 @@ impl Univ2amm for Univ2ammStorage {
                 asset.is_fungible(),
                 "Mint note contains non-fungible tokens"
             );
-            let account_id = AccountId::new(asset.key[3], asset.key[2]);
+            let account_id = get_account_id_from_asset_key(&asset.key).unwrap();
             if account_id.eq(&self.token0()) {
                 amount0_in_note = asset.value[0].as_canonical_u64();
             } else if account_id.eq(&self.token1()) {
@@ -148,16 +148,7 @@ impl Univ2amm for Univ2ammStorage {
             "LP out would be less than desired"
         );
         let account_id = active_account::get_id();
-        let lp_key = Word::from([Felt::ZERO, Felt::ZERO, account_id.suffix, account_id.prefix]);
-        let lp_asset = Asset::new(
-            lp_key,
-            Word::from([
-                Felt::new_unchecked(quote.liquidity_to_user),
-                Felt::ZERO,
-                Felt::ZERO,
-                Felt::ZERO,
-            ]),
-        );
+        let lp_asset = compose_asset(account_id, quote.liquidity_to_user).unwrap();
         let lp_asset = self.issue(lp_asset);
         let note_idx =
             self.prepare_output_note(recipient, serial_num, tag, note_type, self.p2id_root.get());
@@ -184,7 +175,7 @@ impl Univ2amm for Univ2ammStorage {
             asset.is_fungible(),
             "Burn note contains a non-fungible token"
         );
-        let account_id = AccountId::new(asset.key[3], asset.key[2]);
+        let account_id = get_account_id_from_asset_key(&asset.key).unwrap();
         assert!(
             account_id.eq(&active_account::get_id()),
             "Burn note has an asset that is not the LP token"
@@ -199,36 +190,8 @@ impl Univ2amm for Univ2ammStorage {
             quote.amount1 >= min_amount1_out,
             "Amount of token1 out would be less than desired"
         );
-        let token0_key = Word::from([
-            Felt::ZERO,
-            Felt::ZERO,
-            self.token0().suffix,
-            self.token0().prefix,
-        ]);
-        let token1_key = Word::from([
-            Felt::ZERO,
-            Felt::ZERO,
-            self.token1().suffix,
-            self.token1().prefix,
-        ]);
-        let asset0 = Asset::new(
-            token0_key,
-            Word::from([
-                Felt::new_unchecked(quote.amount0),
-                Felt::ZERO,
-                Felt::ZERO,
-                Felt::ZERO,
-            ]),
-        );
-        let asset1 = Asset::new(
-            token1_key,
-            Word::from([
-                Felt::new_unchecked(quote.amount1),
-                Felt::ZERO,
-                Felt::ZERO,
-                Felt::ZERO,
-            ]),
-        );
+        let asset0 = compose_asset(self.token0(), quote.amount0).unwrap();
+        let asset1 = compose_asset(self.token1(), quote.amount1).unwrap();
         let note_idx =
             self.prepare_output_note(recipient, serial_num, tag, note_type, self.p2id_root.get());
         self.add_asset_to_output_note(asset0, note_idx);
@@ -257,7 +220,7 @@ impl Univ2amm for Univ2ammStorage {
             asset.is_fungible(),
             "Swap note contains a non-fungible token"
         );
-        let token_id_in = AccountId::new(asset.key[3], asset.key[2]);
+        let token_id_in = get_account_id_from_asset_key(&asset.key).unwrap();
         let reserves = self.reserves.get();
         let (token_in, token_out, reserve_in, reserve_out) = if token_id_in.eq(&self.token0()) {
             (
@@ -283,17 +246,7 @@ impl Univ2amm for Univ2ammStorage {
             quote.amount_out >= min_amount_out,
             "Amount out would be less than desired"
         );
-        let token_out_key =
-            Word::from([Felt::ZERO, Felt::ZERO, token_out.suffix, token_out.prefix]);
-        let asset_out = Asset::new(
-            token_out_key,
-            Word::from([
-                Felt::new_unchecked(quote.amount_out),
-                Felt::ZERO,
-                Felt::ZERO,
-                Felt::ZERO,
-            ]),
-        );
+        let asset_out = compose_asset(token_out, quote.amount_out).unwrap();
         let note_idx =
             self.prepare_output_note(recipient, serial_num, tag, note_type, self.p2id_root.get());
         native_account::remove_asset(asset);
