@@ -24,12 +24,16 @@ impl PoolMathError {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ConversionError {
     U64ToFelt,
+    AccountIdToAssetKey,
+    AssetKeyToAccountId,
 }
 
 impl ConversionError {
     pub fn to_string(&self) -> &'static str {
         match self {
-            Self::U64ToFelt => "Conversion error U64 -> Felt",
+            Self::U64ToFelt => "Conversion error: U64 -> Felt",
+            Self::AccountIdToAssetKey => "Conversion error: Asset Key -> AccountId",
+            Self::AssetKeyToAccountId => "Conversion error: AccountId -> Asset Key",
         }
     }
 }

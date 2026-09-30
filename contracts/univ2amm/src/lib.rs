@@ -15,9 +15,12 @@ use miden::{
     note, output_note,
 };
 
-use crate::amm::{
-    burn::quote_burn, fees::Fees, mint::quote_mint, reserves::Reserves, swap::amount_out,
-    token::Tokens,
+use crate::{
+    amm::{
+        burn::quote_burn, fees::Fees, mint::quote_mint, reserves::Reserves, swap::amount_out,
+        token::Tokens,
+    },
+    utils::asset::{compose_asset, get_asset_key_from_faucet_id},
 };
 
 #[component_storage]
@@ -72,6 +75,8 @@ trait Univ2amm: NativeAccount + LpFaucet {
         note_type: Felt,
         min_amount_out: u64,
     );
+    #[account_procedure]
+    fn skim(&mut self);
 }
 
 impl Univ2ammStorage {
@@ -304,5 +309,39 @@ impl Univ2amm for Univ2ammStorage {
             reserve1: reserve1_after,
             lp_supply: reserves.lp_supply,
         });
+    }
+    fn skim(&mut self) {
+        let token0_word = get_asset_key_from_faucet_id(&self.token0()).unwrap();
+        let token1_word = get_asset_key_from_faucet_id(&self.token1()).unwrap();
+        let token0_amount = active_account::get_asset(token0_word).a.as_canonical_u64();
+        let token1_amount = active_account::get_asset(token1_word).a.as_canonical_u64();
+        let reserves = self.reserves.get();
+        let mut skim = (0, 0);
+        if token0_amount > reserves.reserve0 {
+            skim.0 = token0_amount - reserves.reserve0;
+        }
+        if token1_amount > reserves.reserve1 {
+            skim.1 = token1_amount - reserves.reserve1;
+        }
+        if skim.0 > 0 || skim.1 > 0 {
+            let fees = self.fees.get();
+            let note_idx = self.prepare_output_note(
+                fees.fee_to(),
+                Word::empty(),
+                Felt::ZERO,
+                Felt::new_unchecked(1).into(),
+                self.p2id_root.get(),
+            );
+            if skim.0 > 0 {
+                let asset = compose_asset(self.token0(), skim.0).unwrap();
+                self.add_asset_to_output_note(asset, note_idx);
+                native_account::remove_asset(asset);
+            }
+            if skim.1 > 0 {
+                let asset = compose_asset(self.token1(), skim.1).unwrap();
+                self.add_asset_to_output_note(asset, note_idx);
+                native_account::remove_asset(asset);
+            }
+        }
     }
 }
