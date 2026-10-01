@@ -37,8 +37,13 @@ impl BurnNoteNote {
         let serial_num = Word::from([storage[4], storage[5], storage[6], storage[7]]);
         let tag = storage[8];
         let note_type = storage[9];
-        let min_amount0 = storage[10];
-        let min_amount1 = storage[11];
+        let deadline = storage[10];
+        assert!(
+            deadline.as_canonical_u64() > tx::get_block_timestamp() as u64,
+            "Note is past its deadline",
+        );
+        let min_amount0 = storage[11];
+        let min_amount1 = storage[12];
         account.burn(
             recipient,
             serial_num,
