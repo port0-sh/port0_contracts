@@ -14,10 +14,19 @@ impl BurnNoteNote {
     #[note_script]
     pub fn run(self, _arg: Word, account: &mut NativeAccount) {
         if active_note::get_sender().eq(&active_account::get_id()) {
-            for asset in active_note::get_initial_assets() {
-                native_account::add_asset(asset);
-            }
+            self.reclaim();
+        } else {
+            self.run_burn(account)
         }
+    }
+
+    fn reclaim(self) {
+        for asset in active_note::get_initial_assets() {
+            native_account::add_asset(asset);
+        }
+    }
+
+    fn run_burn(self, account: &mut NativeAccount) {
         let storage = active_note::get_storage();
         let pool_id = AccountId::new(storage[0], storage[1]);
         assert!(
