@@ -5,13 +5,15 @@ pub struct SwapQuote {
     pub amount_out: u64,
     pub reserve_in_after: u64,
     pub reserve_out_after: u64,
+    pub protocol_fee: u64,
 }
 
 pub fn amount_out(
     amount_in: u64,
     reserve_in: u64,
     reserve_out: u64,
-    fee_bps: u32,
+    lp_fee_bps: u32,
+    protocol_fee_bps: u32,
 ) -> Result<SwapQuote, PoolMathError> {
     if amount_in == 0 {
         return Err(PoolMathError::ZeroAmountIn);
@@ -23,8 +25,12 @@ pub fn amount_out(
         return Err(PoolMathError::Overflow);
     }
     let fee_denominator = 10000;
-    let weight = fee_denominator - fee_bps;
-    let amount_in_with_fee = amount_in as u128 * weight as u128;
+    let protocol_fee = ((fee_denominator - protocol_fee_bps) as u128 * amount_in as u128
+        / fee_denominator as u128) as u64;
+
+    let weight = fee_denominator - lp_fee_bps;
+    let amount_in_with_fee = (amount_in as u128 - protocol_fee as u128) * weight as u128;
+
     let denominator = reserve_in as u128 * fee_denominator as u128 + amount_in_with_fee;
     let numerator = amount_in_with_fee
         .checked_mul(reserve_out as u128)
@@ -46,5 +52,6 @@ pub fn amount_out(
         amount_out: out as u64,
         reserve_in_after,
         reserve_out_after,
+        protocol_fee,
     })
 }

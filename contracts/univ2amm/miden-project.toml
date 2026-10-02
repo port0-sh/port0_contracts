@@ -3,7 +3,6 @@ name = "univ2amm"
 version = "0.1.0"
 
 [package.metadata.miden]
-supported-types = ["RegularAccountUpdatableCode"]
 
 [lib]
 path = "src/lib.rs"

@@ -1,0 +1,13 @@
+[package]
+name = "collect_note"
+version = "0.1.0"
+
+[lib]
+path = "src/lib.rs"
+kind = "note"
+namespace = "miden:collect-note/miden-collect-note@0.1.0"
+
+[dependencies]
+miden-core = "*"
+miden-protocol = "*"
+univ2amm = { path = "../univ2amm" }

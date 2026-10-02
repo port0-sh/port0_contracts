@@ -17,7 +17,11 @@ use miden::{
 
 use crate::{
     amm::{
-        burn::quote_burn, fees::Fees, mint::quote_mint, reserves::Reserves, swap::amount_out,
+        burn::quote_burn,
+        fees::{Fees, ProtocolPot},
+        mint::quote_mint,
+        reserves::Reserves,
+        swap::{SwapQuote, amount_out},
         token::Tokens,
     },
     utils::asset::{compose_asset, get_account_id_from_asset_key, get_asset_key_from_faucet_id},
@@ -35,6 +39,8 @@ struct Univ2ammStorage {
     admin: StorageValue<AccountId>,
     #[storage(description = "P2ID root")]
     p2id_root: StorageValue<Word>,
+    #[storage(description = "Accrued protocol fees")]
+    protocol_pot: StorageValue<ProtocolPot>,
 }
 
 #[component(lp_faucet::LpFaucet)]
@@ -76,7 +82,7 @@ trait Univ2amm: NativeAccount + LpFaucet {
         min_amount_out: u64,
     );
     #[account_procedure]
-    fn skim(&mut self);
+    fn collect(&mut self, serial_num: Word);
 }
 
 impl Univ2ammStorage {
@@ -240,61 +246,68 @@ impl Univ2amm for Univ2ammStorage {
             panic!("Swap note has an asset that is neither token0 nor token1");
         };
         let amount_in = asset.value[0].as_canonical_u64();
-        let quote =
-            amount_out(amount_in, reserve_in, reserve_out, self.fees.get().fee_bps).unwrap();
+        let fees = self.fees.get();
+        let SwapQuote {
+            amount_out,
+            reserve_in_after,
+            reserve_out_after,
+            protocol_fee,
+        } = amount_out(
+            amount_in,
+            reserve_in,
+            reserve_out,
+            fees.lp_fee_bps,
+            fees.protocol_fee_bps,
+        )
+        .unwrap();
         assert!(
-            quote.amount_out >= min_amount_out,
+            amount_out >= min_amount_out,
             "Amount out would be less than desired"
         );
-        let asset_out = compose_asset(token_out, quote.amount_out).unwrap();
+        let asset_out = compose_asset(token_out, amount_out).unwrap();
         let note_idx =
             self.prepare_output_note(recipient, serial_num, tag, note_type, self.p2id_root.get());
         native_account::remove_asset(asset);
         self.add_asset_to_output_note(asset_out, note_idx);
         self.add_asset(asset);
-        let (reserve0_after, reserve1_after) = if token_in.eq(&self.token0()) {
-            (quote.reserve_in_after, quote.reserve_out_after)
-        } else {
-            (quote.reserve_out_after, quote.reserve_in_after)
-        };
+        let (reserve0_after, reserve1_after, amount0_protocol_fee, amount1_protocol_fee) =
+            if token_in.eq(&self.token0()) {
+                (reserve_in_after, reserve_out_after, protocol_fee, 0)
+            } else {
+                (reserve_out_after, reserve_in_after, 0, protocol_fee)
+            };
         self.reserves.set(Reserves {
             reserve0: reserve0_after,
             reserve1: reserve1_after,
             lp_supply: reserves.lp_supply,
         });
+        let mut protocol_pot = self.protocol_pot.get();
+        protocol_pot.add_to_pot(amount0_protocol_fee, amount1_protocol_fee);
+        self.protocol_pot.set(protocol_pot);
     }
-    fn skim(&mut self) {
-        let token0_word = get_asset_key_from_faucet_id(&self.token0()).unwrap();
-        let token1_word = get_asset_key_from_faucet_id(&self.token1()).unwrap();
-        let token0_amount = active_account::get_asset(token0_word).a.as_canonical_u64();
-        let token1_amount = active_account::get_asset(token1_word).a.as_canonical_u64();
-        let reserves = self.reserves.get();
-        let mut skim = (0, 0);
-        if token0_amount > reserves.reserve0 {
-            skim.0 = token0_amount - reserves.reserve0;
+    fn collect(&mut self, serial_num: Word) {
+        let mut protocol_pot = self.protocol_pot.get();
+        let token0_amount = protocol_pot.amount0();
+        let token1_amount = protocol_pot.amount1();
+        let note_idx = self.prepare_output_note(
+            self.fees.get().protocol_fee_to(),
+            serial_num,
+            Felt::ZERO,
+            Felt::new_unchecked(1).into(),
+            self.p2id_root.get(),
+        );
+        if token0_amount > 0 {
+            let asset = compose_asset(self.token0(), token0_amount).unwrap();
+            native_account::remove_asset(asset);
+            self.add_asset_to_output_note(asset, note_idx);
+            protocol_pot.resetAmount0();
         }
-        if token1_amount > reserves.reserve1 {
-            skim.1 = token1_amount - reserves.reserve1;
+        if token1_amount > 0 {
+            let asset = compose_asset(self.token1(), token1_amount).unwrap();
+            native_account::remove_asset(asset);
+            self.add_asset_to_output_note(asset, note_idx);
+            protocol_pot.resetAmount1();
         }
-        if skim.0 > 0 || skim.1 > 0 {
-            let fees = self.fees.get();
-            let note_idx = self.prepare_output_note(
-                fees.fee_to(),
-                Word::empty(),
-                Felt::ZERO,
-                Felt::new_unchecked(1).into(),
-                self.p2id_root.get(),
-            );
-            if skim.0 > 0 {
-                let asset = compose_asset(self.token0(), skim.0).unwrap();
-                self.add_asset_to_output_note(asset, note_idx);
-                native_account::remove_asset(asset);
-            }
-            if skim.1 > 0 {
-                let asset = compose_asset(self.token1(), skim.1).unwrap();
-                self.add_asset_to_output_note(asset, note_idx);
-                native_account::remove_asset(asset);
-            }
-        }
+        self.protocol_pot.set(protocol_pot);
     }
 }
