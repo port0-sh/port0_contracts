@@ -22,11 +22,11 @@ impl MintNoteNote {
 
     fn reclaim(self) {
         for asset in active_note::get_initial_assets() {
-            native_account::add_asset(asset);
+            todo!("How to actually call wallet?");
         }
     }
 
-    pub fn run(self, account: &mut NativeAccount) {
+    pub fn run_mint(self, account: &mut NativeAccount) {
         let storage = active_note::get_storage();
         let pool_id = AccountId::new(storage[0], storage[1]);
         assert!(

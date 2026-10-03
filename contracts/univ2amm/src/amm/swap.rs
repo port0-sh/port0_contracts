@@ -25,8 +25,8 @@ pub fn amount_out(
         return Err(PoolMathError::Overflow);
     }
     let fee_denominator = 10000;
-    let protocol_fee = ((fee_denominator - protocol_fee_bps) as u128 * amount_in as u128
-        / fee_denominator as u128) as u64;
+    let protocol_fee =
+        ((protocol_fee_bps) as u128 * amount_in as u128 / fee_denominator as u128) as u64;
 
     let weight = fee_denominator - lp_fee_bps;
     let amount_in_with_fee = (amount_in as u128 - protocol_fee as u128) * weight as u128;

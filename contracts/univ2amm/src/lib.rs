@@ -145,7 +145,6 @@ impl Univ2amm for Univ2ammStorage {
             } else {
                 panic!("Mint note has an asset that is neither token0 nor token1");
             }
-            native_account::remove_asset(asset);
             self.add_asset(asset);
         }
         let quote = quote_mint(amount0_in_note, amount1_in_note, self.reserves.get()).unwrap();
@@ -267,7 +266,7 @@ impl Univ2amm for Univ2ammStorage {
         let asset_out = compose_asset(token_out, amount_out).unwrap();
         let note_idx =
             self.prepare_output_note(recipient, serial_num, tag, note_type, self.p2id_root.get());
-        native_account::remove_asset(asset);
+        native_account::remove_asset(asset_out);
         self.add_asset_to_output_note(asset_out, note_idx);
         self.add_asset(asset);
         let (reserve0_after, reserve1_after, amount0_protocol_fee, amount1_protocol_fee) =

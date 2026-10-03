@@ -48,7 +48,7 @@ impl WordValue for Fees {
     fn try_from_word(word: Word) -> Result<Self, &'static str> {
         Ok(Self {
             lp_fee_bps: word.a.as_canonical_u64() as u32,
-            protocol_fee_bps: word.a.as_canonical_u64() as u32,
+            protocol_fee_bps: word.b.as_canonical_u64() as u32,
             protocol_fee_to: AccountId::new(word.c, word.d),
         })
     }

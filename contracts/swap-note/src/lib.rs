@@ -22,7 +22,7 @@ impl SwapNoteNote {
 
     fn reclaim(self) {
         for asset in active_note::get_initial_assets() {
-            native_account::add_asset(asset);
+            todo!("How to actually call wallet?");
         }
     }
 

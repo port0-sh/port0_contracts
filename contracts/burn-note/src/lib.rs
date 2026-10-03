@@ -22,7 +22,7 @@ impl BurnNoteNote {
 
     fn reclaim(self) {
         for asset in active_note::get_initial_assets() {
-            active_account::add_asset(asset);
+            todo!("How to actually call wallet?");
         }
     }
 
