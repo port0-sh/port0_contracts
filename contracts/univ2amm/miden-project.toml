@@ -12,4 +12,3 @@ namespace = "miden:univ2amm/univ2amm@0.1.0"
 [dependencies]
 miden-core = "*"
 miden-protocol = "*"
-lp-faucet = { path = "../lp-faucet" }

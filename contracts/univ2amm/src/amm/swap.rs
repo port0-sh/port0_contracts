@@ -28,8 +28,10 @@ pub fn amount_out(
     let protocol_fee =
         ((protocol_fee_bps) as u128 * amount_in as u128 / fee_denominator as u128) as u64;
 
+    assert!(lp_fee_bps + protocol_fee_bps < 10_000);
+    let lp_amount = amount_in - protocol_fee;
     let weight = fee_denominator - lp_fee_bps;
-    let amount_in_with_fee = (amount_in as u128 - protocol_fee as u128) * weight as u128;
+    let amount_in_with_fee = lp_amount as u128 * weight as u128;
 
     let denominator = reserve_in as u128 * fee_denominator as u128 + amount_in_with_fee;
     let numerator = amount_in_with_fee
@@ -42,7 +44,7 @@ pub fn amount_out(
     if out >= reserve_out as u128 {
         return Err(PoolMathError::InsufficientLiquidity);
     }
-    let (reserve_in_after, has_overflown_add) = reserve_in.overflowing_add(amount_in);
+    let (reserve_in_after, has_overflown_add) = reserve_in.overflowing_add(lp_amount);
     let (reserve_out_after, has_overflown_sub) = reserve_out.overflowing_sub(out as u64);
     if has_overflown_add || has_overflown_sub || reserve_in_after >= MAX_AMOUNT {
         return Err(PoolMathError::Overflow);

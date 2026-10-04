@@ -10,29 +10,35 @@ pub mod utils;
 
 use miden::{
     AccountId, Asset, Felt, NoteIdx, NoteType, StorageValue, Tag, Word, active_account,
-    active_note, component, component_storage,
+    active_note, component, component_storage, faucet,
     native_account::{self, NativeAccount},
     note, output_note,
 };
 
 use crate::{
     amm::{
-        burn::quote_burn,
+        burn::{BurnQuote, quote_burn},
         fees::{Fees, ProtocolPot},
-        mint::quote_mint,
+        mint::{MintQuote, quote_mint},
         reserves::Reserves,
         swap::{SwapQuote, amount_out},
-        token::Tokens,
     },
-    utils::asset::{compose_asset, get_account_id_from_asset_key, get_asset_key_from_faucet_id},
+    utils::{
+        asset::compose_asset,
+        u128::{self, U128},
+    },
 };
 
 #[component_storage]
 struct Univ2ammStorage {
-    #[storage(description = "AccountIds of token0 and token1")]
-    tokens: StorageValue<Tokens>,
-    #[storage(description = "Reserves of token0, token1 and total lp supply")]
-    reserves: StorageValue<Reserves>,
+    #[storage(description = "LP token asset key")]
+    tokenlp_asset_key: StorageValue<Word>,
+    #[storage(description = "token0 asset key")]
+    token0_asset_key: StorageValue<Word>,
+    #[storage(description = "token1 asset key")]
+    token1_asset_key: StorageValue<Word>,
+    #[storage(description = "Total lp supply")]
+    lp_supply: StorageValue<Felt>,
     #[storage(description = "Fee beneficiary and the fee amount")]
     fees: StorageValue<Fees>,
     #[storage(description = "AccountId that is permitted to make admin changes")]
@@ -41,48 +47,51 @@ struct Univ2ammStorage {
     p2id_root: StorageValue<Word>,
     #[storage(description = "Accrued protocol fees")]
     protocol_pot: StorageValue<ProtocolPot>,
+    #[storage(description = "Cumulative last price0")]
+    price0_cumulative_last: StorageValue<U128>,
+    #[storage(description = "Cumulative last price1")]
+    price1_cumulative_last: StorageValue<U128>,
+    #[storage(description = "Last price change timestamp")]
+    block_timestamp_last: StorageValue<Felt>,
 }
 
-#[component(lp_faucet::LpFaucet)]
-trait Univ2amm: NativeAccount + LpFaucet {
+#[component]
+trait Univ2amm: NativeAccount {
     #[account_procedure]
-    fn token0(&self) -> AccountId;
+    fn tokenlp_asset_key(&self) -> Word;
     #[account_procedure]
-    fn token1(&self) -> AccountId;
+    fn token0_asset_key(&self) -> Word;
+    #[account_procedure]
+    fn token1_asset_key(&self) -> Word;
+    #[account_procedure]
+    fn lp_supply(&self) -> Felt;
     #[account_procedure]
     fn get_reserves(&self) -> Reserves;
     #[account_procedure]
     fn get_fees(&self) -> Fees;
     #[account_procedure]
-    fn mint(
-        &mut self,
-        recipient: AccountId,
-        serial_num: Word,
-        tag: Felt,
-        note_type: Felt,
-        min_lp_out: u64,
-    );
+    fn mint(&mut self, recipient: AccountId, serial_num: Word, tag: Felt, min_lp_out: u64);
     #[account_procedure]
     fn burn(
         &mut self,
         recipient: AccountId,
         serial_num: Word,
         tag: Felt,
-        note_type: Felt,
         min_token0_out: u64,
         min_token1_out: u64,
     );
     #[account_procedure]
-    fn swap(
-        &mut self,
-        recipient: AccountId,
-        serial_num: Word,
-        tag: Felt,
-        note_type: Felt,
-        min_amount_out: u64,
-    );
+    fn swap(&mut self, recipient: AccountId, serial_num: Word, tag: Felt, min_amount_out: u64);
     #[account_procedure]
     fn collect(&mut self, serial_num: Word);
+    #[account_procedure]
+    fn configure(
+        &mut self,
+        lp_fee: u32,
+        protocol_fee: u32,
+        protocol_fee_to: AccountId,
+        p2id_root: Word,
+    );
 }
 
 impl Univ2ammStorage {
@@ -94,7 +103,6 @@ impl Univ2ammStorage {
         recipient: AccountId,
         serial_num: Word,
         tag: Felt,
-        note_type: Felt,
         script_root: Word,
     ) -> NoteIdx {
         let note_recipient = note::build_recipient(
@@ -102,77 +110,113 @@ impl Univ2ammStorage {
             script_root,
             alloc::vec![recipient.suffix, recipient.prefix],
         );
-        let note_idx =
-            output_note::create(Tag::from(tag), NoteType::from(note_type), note_recipient);
+        let note_idx = output_note::create(Tag::from(tag), NoteType::from(&1), note_recipient);
         note_idx
     }
 }
 
 #[component]
 impl Univ2amm for Univ2ammStorage {
-    fn token0(&self) -> AccountId {
-        self.tokens.get().token0()
+    fn tokenlp_asset_key(&self) -> Word {
+        self.tokenlp_asset_key.get()
     }
-    fn token1(&self) -> AccountId {
-        self.tokens.get().token1()
+    fn token0_asset_key(&self) -> Word {
+        self.token0_asset_key.get()
     }
-    fn get_reserves(&self) -> Reserves {
-        self.reserves.get()
+    fn token1_asset_key(&self) -> Word {
+        self.token1_asset_key.get()
+    }
+    fn lp_supply(&self) -> Felt {
+        self.lp_supply.get()
     }
     fn get_fees(&self) -> Fees {
         self.fees.get()
     }
-    fn mint(
-        &mut self,
-        recipient: AccountId,
-        serial_num: Word,
-        tag: Felt,
-        note_type: Felt,
-        min_lp_out: u64,
-    ) {
+    fn get_reserves(&self) -> Reserves {
+        let protocol_pot = self.protocol_pot.get();
+        let token0_asset_key = self.token0_asset_key();
+        let token1_asset_key = self.token1_asset_key();
+        Reserves {
+            reserve0: active_account::get_asset(token0_asset_key)[0].as_canonical_u64()
+                - protocol_pot.amount0,
+            reserve1: active_account::get_asset(token1_asset_key)[0].as_canonical_u64()
+                - protocol_pot.amount1,
+        }
+    }
+    fn mint(&mut self, recipient: AccountId, serial_num: Word, tag: Felt, min_lp_out: u64) {
         let mut amount0_in_note = 0u64;
         let mut amount1_in_note = 0u64;
+        let (token0_asset_key, token1_asset_key, tokenlp_asset_key) = (
+            self.token0_asset_key(),
+            self.token1_asset_key(),
+            self.tokenlp_asset_key(),
+        );
+        assert!(
+            token0_asset_key.ne(&token1_asset_key),
+            "token0 must be different than token1"
+        );
         for asset in active_note::get_initial_assets() {
             assert!(
                 asset.is_fungible(),
                 "Mint note contains non-fungible tokens"
             );
-            let account_id = get_account_id_from_asset_key(&asset.key).unwrap();
-            if account_id.eq(&self.token0()) {
+            if asset.key.eq(&token0_asset_key) {
                 amount0_in_note = asset.value[0].as_canonical_u64();
-            } else if account_id.eq(&self.token1()) {
+            } else if asset.key.eq(&token1_asset_key) {
                 amount1_in_note = asset.value[0].as_canonical_u64();
             } else {
                 panic!("Mint note has an asset that is neither token0 nor token1");
             }
             self.add_asset(asset);
         }
-        let quote = quote_mint(amount0_in_note, amount1_in_note, self.reserves.get()).unwrap();
+
+        let MintQuote {
+            liquidity_to_user,
+            lp_supply_after,
+            reserve0_after: _,
+            reserve1_after: _,
+            refund0,
+            refund1,
+        } = quote_mint(
+            amount0_in_note,
+            amount1_in_note,
+            self.get_reserves(),
+            self.lp_supply.get().as_canonical_u64(),
+        )
+        .unwrap();
         assert!(
-            quote.liquidity_to_user >= min_lp_out,
+            liquidity_to_user >= min_lp_out,
             "LP out would be less than desired"
         );
-        let account_id = active_account::get_id();
-        let lp_asset = compose_asset(account_id, quote.liquidity_to_user).unwrap();
-        let lp_asset = self.issue(lp_asset);
-        let note_idx =
-            self.prepare_output_note(recipient, serial_num, tag, note_type, self.p2id_root.get());
+        let note_idx = self.prepare_output_note(recipient, serial_num, tag, self.p2id_root.get());
+        let lp_asset = compose_asset(tokenlp_asset_key, liquidity_to_user).unwrap();
+        faucet::mint(lp_asset);
         self.add_asset_to_output_note(lp_asset, note_idx);
-        self.reserves.set(Reserves {
-            reserve0: quote.reserve0_after,
-            reserve1: quote.reserve1_after,
-            lp_supply: quote.lp_supply_after,
-        });
+        if refund0 > 0 {
+            let asset = compose_asset(token0_asset_key, refund0).unwrap();
+            self.add_asset_to_output_note(asset, note_idx);
+            native_account::remove_asset(asset);
+        }
+        if refund1 > 0 {
+            let asset = compose_asset(token1_asset_key, refund1).unwrap();
+            self.add_asset_to_output_note(asset, note_idx);
+            native_account::remove_asset(asset);
+        }
+        self.lp_supply.set(Felt::new_unchecked(lp_supply_after));
     }
     fn burn(
         &mut self,
         recipient: AccountId,
         serial_num: Word,
         tag: Felt,
-        note_type: Felt,
         min_amount0_out: u64,
         min_amount1_out: u64,
     ) {
+        let (token0_asset_key, token1_asset_key, tokenlp_asset_key) = (
+            self.token0_asset_key(),
+            self.token1_asset_key(),
+            self.tokenlp_asset_key(),
+        );
         let assets = active_note::get_initial_assets();
         assert!(assets.len() == 1, "Burn note should contain only one asset");
         let asset = assets[0];
@@ -180,44 +224,42 @@ impl Univ2amm for Univ2ammStorage {
             asset.is_fungible(),
             "Burn note contains a non-fungible token"
         );
-        let account_id = get_account_id_from_asset_key(&asset.key).unwrap();
         assert!(
-            account_id.eq(&active_account::get_id()),
+            asset.key.eq(&tokenlp_asset_key),
             "Burn note has an asset that is not the LP token"
         );
         let amount_in_note = asset.value[0].as_canonical_u64();
-        let quote = quote_burn(amount_in_note, self.reserves.get()).unwrap();
+        let BurnQuote {
+            amount0,
+            amount1,
+            lp_supply_after,
+            reserve0_after: _,
+            reserve1_after: _,
+        } = quote_burn(
+            amount_in_note,
+            self.get_reserves(),
+            self.lp_supply.get().as_canonical_u64(),
+        )
+        .unwrap();
         assert!(
-            quote.amount0 >= min_amount0_out,
+            amount0 >= min_amount0_out,
             "Amount of token0 out would be less than desired"
         );
         assert!(
-            quote.amount1 >= min_amount1_out,
+            amount1 >= min_amount1_out,
             "Amount of token1 out would be less than desired"
         );
-        let asset0 = compose_asset(self.token0(), quote.amount0).unwrap();
-        let asset1 = compose_asset(self.token1(), quote.amount1).unwrap();
-        let note_idx =
-            self.prepare_output_note(recipient, serial_num, tag, note_type, self.p2id_root.get());
+        let asset0 = compose_asset(token0_asset_key, amount0).unwrap();
+        let asset1 = compose_asset(token1_asset_key, amount1).unwrap();
+        let note_idx = self.prepare_output_note(recipient, serial_num, tag, self.p2id_root.get());
         self.add_asset_to_output_note(asset0, note_idx);
         self.add_asset_to_output_note(asset1, note_idx);
         native_account::remove_asset(asset0);
         native_account::remove_asset(asset1);
-        self.redeem(asset);
-        self.reserves.set(Reserves {
-            reserve0: quote.reserve0_after,
-            reserve1: quote.reserve1_after,
-            lp_supply: quote.lp_supply_after,
-        });
+        faucet::burn(asset);
+        self.lp_supply.set(Felt::new_unchecked(lp_supply_after));
     }
-    fn swap(
-        &mut self,
-        recipient: AccountId,
-        serial_num: Word,
-        tag: Felt,
-        note_type: Felt,
-        min_amount_out: u64,
-    ) {
+    fn swap(&mut self, recipient: AccountId, serial_num: Word, tag: Felt, min_amount_out: u64) {
         let assets = active_note::get_initial_assets();
         assert!(assets.len() == 1, "Swap note should contain only one asset");
         let asset = assets[0];
@@ -225,19 +267,24 @@ impl Univ2amm for Univ2ammStorage {
             asset.is_fungible(),
             "Swap note contains a non-fungible token"
         );
-        let token_id_in = get_account_id_from_asset_key(&asset.key).unwrap();
-        let reserves = self.reserves.get();
-        let (token_in, token_out, reserve_in, reserve_out) = if token_id_in.eq(&self.token0()) {
+        let reserves = self.get_reserves();
+        let (token0_asset_key, token1_asset_key) =
+            (self.token0_asset_key(), self.token1_asset_key());
+        assert!(
+            token0_asset_key.ne(&token1_asset_key),
+            "token0 must be different than token1"
+        );
+        let (token_in, token_out, reserve_in, reserve_out) = if asset.key.eq(&token0_asset_key) {
             (
-                self.token0(),
-                self.token1(),
+                token0_asset_key,
+                token1_asset_key,
                 reserves.reserve0(),
                 reserves.reserve1(),
             )
-        } else if token_id_in.eq(&self.token1()) {
+        } else if asset.key.eq(&token1_asset_key) {
             (
-                self.token1(),
-                self.token0(),
+                token1_asset_key,
+                token0_asset_key,
                 reserves.reserve1(),
                 reserves.reserve0(),
             )
@@ -248,8 +295,8 @@ impl Univ2amm for Univ2ammStorage {
         let fees = self.fees.get();
         let SwapQuote {
             amount_out,
-            reserve_in_after,
-            reserve_out_after,
+            reserve_in_after: _,
+            reserve_out_after: _,
             protocol_fee,
         } = amount_out(
             amount_in,
@@ -264,22 +311,15 @@ impl Univ2amm for Univ2ammStorage {
             "Amount out would be less than desired"
         );
         let asset_out = compose_asset(token_out, amount_out).unwrap();
-        let note_idx =
-            self.prepare_output_note(recipient, serial_num, tag, note_type, self.p2id_root.get());
+        let note_idx = self.prepare_output_note(recipient, serial_num, tag, self.p2id_root.get());
         native_account::remove_asset(asset_out);
         self.add_asset_to_output_note(asset_out, note_idx);
         self.add_asset(asset);
-        let (reserve0_after, reserve1_after, amount0_protocol_fee, amount1_protocol_fee) =
-            if token_in.eq(&self.token0()) {
-                (reserve_in_after, reserve_out_after, protocol_fee, 0)
-            } else {
-                (reserve_out_after, reserve_in_after, 0, protocol_fee)
-            };
-        self.reserves.set(Reserves {
-            reserve0: reserve0_after,
-            reserve1: reserve1_after,
-            lp_supply: reserves.lp_supply,
-        });
+        let (amount0_protocol_fee, amount1_protocol_fee) = if token_in.eq(&token0_asset_key) {
+            (protocol_fee, 0)
+        } else {
+            (0, protocol_fee)
+        };
         let mut protocol_pot = self.protocol_pot.get();
         protocol_pot.add_to_pot(amount0_protocol_fee, amount1_protocol_fee);
         self.protocol_pot.set(protocol_pot);
@@ -288,25 +328,35 @@ impl Univ2amm for Univ2ammStorage {
         let mut protocol_pot = self.protocol_pot.get();
         let token0_amount = protocol_pot.amount0();
         let token1_amount = protocol_pot.amount1();
+        let (token0_asset_key, token1_asset_key) =
+            (self.token0_asset_key(), self.token1_asset_key());
         let note_idx = self.prepare_output_note(
             self.fees.get().protocol_fee_to(),
             serial_num,
             Felt::ZERO,
-            Felt::new_unchecked(1).into(),
             self.p2id_root.get(),
         );
         if token0_amount > 0 {
-            let asset = compose_asset(self.token0(), token0_amount).unwrap();
+            let asset = compose_asset(token0_asset_key, token0_amount).unwrap();
             native_account::remove_asset(asset);
             self.add_asset_to_output_note(asset, note_idx);
             protocol_pot.resetAmount0();
         }
         if token1_amount > 0 {
-            let asset = compose_asset(self.token1(), token1_amount).unwrap();
+            let asset = compose_asset(token1_asset_key, token1_amount).unwrap();
             native_account::remove_asset(asset);
             self.add_asset_to_output_note(asset, note_idx);
             protocol_pot.resetAmount1();
         }
         self.protocol_pot.set(protocol_pot);
+    }
+    fn configure(
+        &mut self,
+        lp_fee: u32,
+        protocol_fee: u32,
+        protocol_fee_to: AccountId,
+        p2id_root: Word,
+    ) {
+        if active_note::sender().eq(self.admin.get()) {}
     }
 }

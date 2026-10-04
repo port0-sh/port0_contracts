@@ -6,21 +6,14 @@ use crate::error::ConversionError;
 pub struct Reserves {
     pub reserve0: u64,
     pub reserve1: u64,
-    pub lp_supply: u64,
 }
 
 impl Reserves {
-    pub fn k(&self) -> u128 {
-        self.reserve0 as u128 * self.reserve1 as u128
-    }
     pub fn reserve0(&self) -> u64 {
         self.reserve0
     }
     pub fn reserve1(&self) -> u64 {
         self.reserve1
-    }
-    pub fn lp_supply(&self) -> u64 {
-        self.lp_supply
     }
 }
 
@@ -29,7 +22,7 @@ impl WordValue for Reserves {
         Ok(Word::from([
             Felt::try_from(self.reserve0).map_err(|_| ConversionError::U64ToFelt.to_string())?,
             Felt::try_from(self.reserve1).map_err(|_| ConversionError::U64ToFelt.to_string())?,
-            Felt::try_from(self.lp_supply).map_err(|_| ConversionError::U64ToFelt.to_string())?,
+            Felt::ZERO,
             Felt::ZERO,
         ]))
     }
@@ -37,7 +30,6 @@ impl WordValue for Reserves {
         Ok(Self {
             reserve0: word.a.as_canonical_u64(),
             reserve1: word.b.as_canonical_u64(),
-            lp_supply: word.c.as_canonical_u64(),
         })
     }
 }

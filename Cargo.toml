@@ -1,11 +1,13 @@
 [workspace]
 resolver = "2"
 members = [
-  "contracts/lp-faucet",
+  "contracts/burn-note",
+  "contracts/collect-note",
   "contracts/mint-note",
+  "contracts/swap-note",
   "contracts/univ2amm",
   "integration"
-, "contracts/burn-note", "contracts/swap-note", "contracts/collect-note"]
+, "contracts/admin-note"]
 exclude = [
   "contracts/",
 ]

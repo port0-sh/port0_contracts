@@ -13,12 +13,12 @@ pub struct BurnQuote {
     pub reserve1_after: u64,
 }
 
-pub fn quote_burn(liquidity: u64, reserves: Reserves) -> Result<BurnQuote, PoolMathError> {
-    let Reserves {
-        reserve0,
-        reserve1,
-        lp_supply,
-    } = reserves;
+pub fn quote_burn(
+    liquidity: u64,
+    reserves: Reserves,
+    lp_supply: u64,
+) -> Result<BurnQuote, PoolMathError> {
+    let Reserves { reserve0, reserve1 } = reserves;
     if liquidity == 0 {
         return Err(PoolMathError::ZeroAmountIn);
     }
