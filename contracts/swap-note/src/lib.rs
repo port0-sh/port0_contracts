@@ -3,7 +3,7 @@
 
 use miden::*;
 
-#[account(univ2amm::Univ2amm, basic_wallet::BasicWallet)]
+#[account(univ2amm::Univ2amm)]
 pub struct NativeAccount;
 
 #[note]
