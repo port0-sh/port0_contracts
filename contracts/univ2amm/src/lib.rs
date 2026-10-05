@@ -110,7 +110,11 @@ impl Univ2ammStorage {
             script_root,
             alloc::vec![recipient.suffix, recipient.prefix],
         );
-        let note_idx = output_note::create(Tag::from(tag), NoteType::from(&1), note_recipient);
+        let note_idx = output_note::create(
+            Tag::from(tag),
+            NoteType::from(Felt::new_unchecked(1)),
+            note_recipient,
+        );
         note_idx
     }
 }
@@ -352,11 +356,20 @@ impl Univ2amm for Univ2ammStorage {
     }
     fn configure(
         &mut self,
-        lp_fee: u32,
-        protocol_fee: u32,
+        lp_fee_bps: u32,
+        protocol_fee_bps: u32,
         protocol_fee_to: AccountId,
         p2id_root: Word,
     ) {
-        if active_note::sender().eq(self.admin.get()) {}
+        assert!(
+            active_note::get_sender().eq(&self.admin.get()),
+            "Configuration can only be changed by the admin account"
+        );
+        self.fees.set(Fees {
+            lp_fee_bps,
+            protocol_fee_bps,
+            protocol_fee_to,
+        });
+        self.p2id_root.set(p2id_root);
     }
 }

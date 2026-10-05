@@ -20,8 +20,6 @@ pub fn quote_mint(
     reserves: Reserves,
     lp_supply: u64,
 ) -> Result<MintQuote, PoolMathError> {
-    let lp_supply = reserves.lp_supply();
-
     if amount0 == 0 || amount1 == 0 {
         return Err(PoolMathError::ZeroAmountIn);
     }
