@@ -120,8 +120,11 @@ impl Univ2ammStorage {
     }
     fn update_oracle(&mut self, reserves: Reserves) {
         let now = tx::get_block_timestamp() as u64;
-        let last = self.block_timestamp_last.get().as_canonical_u64();
-        if now <= last || reserves.reserve0 == 0 || reserves.reserve1 == 0 {
+        let mut last = self.block_timestamp_last.get().as_canonical_u64();
+        if now < last {
+            last = now;
+        }
+        if reserves.reserve0 == 0 || reserves.reserve1 == 0 {
             return;
         }
         let elapsed = (now - last) as u128;
