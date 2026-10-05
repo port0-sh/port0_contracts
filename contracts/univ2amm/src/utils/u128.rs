@@ -5,6 +5,20 @@ pub struct U128 {
     inner: Word,
 }
 
+impl U128 {
+    pub fn new(val: u128) -> Self {
+        Self {
+            inner: u128_to_word(val),
+        }
+    }
+    pub fn as_u128(&self) -> u128 {
+        word_to_u128(self.inner)
+    }
+    pub fn as_word(&self) -> Word {
+        self.inner
+    }
+}
+
 pub fn word_to_u128(w: Word) -> u128 {
     (w.a.as_canonical_u64() as u128)
         | ((w.b.as_canonical_u64() as u128) << 32)

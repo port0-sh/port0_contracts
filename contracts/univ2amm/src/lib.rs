@@ -12,7 +12,7 @@ use miden::{
     AccountId, Asset, Felt, NoteIdx, NoteType, StorageValue, Tag, Word, active_account,
     active_note, component, component_storage, faucet,
     native_account::{self, NativeAccount},
-    note, output_note,
+    note, output_note, tx,
 };
 
 use crate::{
@@ -25,7 +25,8 @@ use crate::{
     },
     utils::{
         asset::compose_asset,
-        u128::{self, U128},
+        note::account_target_tag,
+        u128::{self, U128, u128_to_word, word_to_u128},
     },
 };
 
@@ -92,6 +93,7 @@ trait Univ2amm: NativeAccount {
         protocol_fee_to: AccountId,
         p2id_root: Word,
     );
+    fn update_oracle(&mut self, reserves: Reserves);
 }
 
 impl Univ2ammStorage {
@@ -334,10 +336,11 @@ impl Univ2amm for Univ2ammStorage {
         let token1_amount = protocol_pot.amount1();
         let (token0_asset_key, token1_asset_key) =
             (self.token0_asset_key(), self.token1_asset_key());
+        let fee_to = self.fees.get().protocol_fee_to();
         let note_idx = self.prepare_output_note(
-            self.fees.get().protocol_fee_to(),
+            fee_to,
             serial_num,
-            Felt::ZERO,
+            account_target_tag(fee_to),
             self.p2id_root.get(),
         );
         if token0_amount > 0 {
@@ -371,5 +374,29 @@ impl Univ2amm for Univ2ammStorage {
             protocol_fee_to,
         });
         self.p2id_root.set(p2id_root);
+    }
+
+    fn update_oracle(&mut self, reserves: Reserves) {
+        let now = tx::get_block_timestamp() as u64;
+        let last = self.block_timestamp_last.get().as_canonical_u64();
+        if now <= last || reserves.reserve0 == 0 || reserves.reserve1 == 0 {
+            return;
+        }
+        let elapsed = (now - last) as u128;
+        let p0 = ((reserves.reserve1 as u128) << 64) / reserves.reserve0 as u128;
+        let p1 = ((reserves.reserve0 as u128) << 64) / reserves.reserve1 as u128;
+        let c0 = self
+            .price0_cumulative_last
+            .get()
+            .as_u128()
+            .wrapping_add(p0.wrapping_mul(elapsed));
+        let c1 = self
+            .price1_cumulative_last
+            .get()
+            .as_u128()
+            .wrapping_add(p1.wrapping_mul(elapsed));
+        self.price0_cumulative_last.set(U128::new(c0));
+        self.price1_cumulative_last.set(U128::new(c1));
+        self.block_timestamp_last.set(Felt::new_unchecked(now));
     }
 }
