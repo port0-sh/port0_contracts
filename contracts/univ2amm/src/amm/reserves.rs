@@ -3,6 +3,7 @@ use miden::{Felt, Word, WordValue, export_type};
 use crate::error::ConversionError;
 
 #[export_type]
+#[derive(Clone, Copy)]
 pub struct Reserves {
     pub reserve0: u64,
     pub reserve1: u64,
