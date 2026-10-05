@@ -363,6 +363,10 @@ impl Univ2amm for Univ2ammStorage {
         let mut protocol_pot = self.protocol_pot.get();
         let token0_amount = protocol_pot.amount0();
         let token1_amount = protocol_pot.amount1();
+        assert!(
+            token0_amount > 0 || token1_amount > 0,
+            "Protocol pot is empty"
+        );
         let (token0_asset_key, token1_asset_key) =
             (self.token0_asset_key(), self.token1_asset_key());
         let fee_to = self.fees.get().protocol_fee_to();
