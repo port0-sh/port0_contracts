@@ -2,6 +2,7 @@
 name = "swap_note"
 version = "0.1.0"
 edition = "2024"
+authors = ['mic0 <mic0@mic0.dev>']
 
 [lib]
 # Build this crate as a self-contained, C-style dynamic library

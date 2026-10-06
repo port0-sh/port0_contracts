@@ -15,5 +15,6 @@ exclude = [
 
 [workspace.package]
 edition = "2021"
+authors = ['mic0 <mic0@mic0.dev>']
 
 [workspace.dependencies]
