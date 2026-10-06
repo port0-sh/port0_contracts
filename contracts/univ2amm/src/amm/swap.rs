@@ -1,5 +1,8 @@
+use miden::export_type;
+
 use crate::{error::PoolMathError, utils::math::MAX_AMOUNT};
 
+#[export_type]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct SwapQuote {
     pub amount_out: u64,
@@ -28,7 +31,6 @@ pub fn amount_out(
     let protocol_fee =
         ((protocol_fee_bps) as u128 * amount_in as u128 / fee_denominator as u128) as u64;
 
-    assert!(lp_fee_bps + protocol_fee_bps < 10_000);
     let lp_amount = amount_in - protocol_fee;
     let weight = fee_denominator - lp_fee_bps;
     let amount_in_with_fee = lp_amount as u128 * weight as u128;

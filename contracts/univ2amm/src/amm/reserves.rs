@@ -9,15 +9,6 @@ pub struct Reserves {
     pub reserve1: u64,
 }
 
-impl Reserves {
-    pub fn reserve0(&self) -> u64 {
-        self.reserve0
-    }
-    pub fn reserve1(&self) -> u64 {
-        self.reserve1
-    }
-}
-
 impl WordValue for Reserves {
     fn try_into_word(self) -> Result<Word, &'static str> {
         Ok(Word::from([

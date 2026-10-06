@@ -7,35 +7,6 @@ pub struct Fees {
     pub protocol_fee_to: AccountId,
 }
 
-impl Fees {
-    pub fn lp_fee_bps(&self) -> u32 {
-        self.lp_fee_bps
-    }
-    pub fn protocol_fee_bps(&self) -> u32 {
-        self.protocol_fee_bps
-    }
-    pub fn protocol_fee_to(&self) -> AccountId {
-        self.protocol_fee_to
-    }
-    pub fn set_protocol_fee_to(&mut self, fee_to: AccountId) {
-        self.protocol_fee_to = fee_to
-    }
-    pub fn set_lp_fee_bps(&mut self, fee_bps: u32) {
-        assert!(
-            self.protocol_fee_bps + fee_bps < 10000,
-            "Total fee bps must be less than 10000"
-        );
-        self.lp_fee_bps = fee_bps
-    }
-    pub fn set_protocol_fee_bps(&mut self, fee_bps: u32) {
-        assert!(
-            self.lp_fee_bps + fee_bps < 10000,
-            "Total fee bps must be less than 10000"
-        );
-        self.protocol_fee_bps = fee_bps
-    }
-}
-
 impl WordValue for Fees {
     fn try_into_word(self) -> Result<Word, &'static str> {
         Ok(Word::from([

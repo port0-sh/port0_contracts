@@ -21,12 +21,19 @@ impl AdminNoteNote {
         let pool_id = AccountId::new(storage[0], storage[1]);
         assert!(
             active_account::get_id().eq(&pool_id),
-            "Prevented execution on an unauthorized account"
+            "Invalid pool account to execute against"
         );
         let protocol_fee_to = AccountId::new(storage[2], storage[3]);
         let lp_fee = storage[4].as_canonical_u64() as u32;
         let protocol_fee = storage[5].as_canonical_u64() as u32;
         let p2id_root = Word::new([storage[6], storage[7], storage[8], storage[9]]);
-        account.configure(lp_fee, protocol_fee, protocol_fee_to, p2id_root);
+        let tokenlp_asset_word = Word::new([storage[10], storage[11], storage[12], storage[13]]);
+        account.configure(
+            lp_fee,
+            protocol_fee,
+            protocol_fee_to,
+            p2id_root,
+            tokenlp_asset_word,
+        );
     }
 }

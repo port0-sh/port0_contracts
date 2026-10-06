@@ -34,12 +34,10 @@ pub fn quote_mint(
             if reserve0 != 0 || reserve1 != 0 {
                 return Err(PoolMathError::Invariant);
             }
-            let root = isqrt(reserve0_after as u128 * reserve1_after as u128 /* k */);
+            let root = isqrt(reserve0_after as u128 * reserve1_after as u128);
             if root <= MINIMUM_LIQUIDITY {
                 return Err(PoolMathError::InsufficientLiquidity);
             }
-            let reserve0_after = add_amount(reserve0, amount0)?;
-            let reserve1_after = add_amount(reserve1, amount1)?;
             (
                 root - MINIMUM_LIQUIDITY,
                 root,

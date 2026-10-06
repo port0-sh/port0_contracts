@@ -35,7 +35,7 @@ impl MintNoteNote {
         let pool_id = AccountId::new(storage[0], storage[1]);
         assert!(
             active_account::get_id().eq(&pool_id),
-            "Prevented execution on an unauthorized account"
+            "Invalid pool account to execute against"
         );
         let recipient = AccountId::new(storage[2], storage[3]);
         let serial_num = Word::from([storage[4], storage[5], storage[6], storage[7]]);

@@ -84,6 +84,8 @@ trait Univ2amm: NativeAccount {
     #[account_procedure]
     fn swap(&mut self, recipient: AccountId, serial_num: Word, tag: Felt, min_amount_out: u64);
     #[account_procedure]
+    fn quote_swap(&mut self, token_in_is_0: bool, amount_in: u64) -> SwapQuote;
+    #[account_procedure]
     fn collect(&mut self, serial_num: Word);
     #[account_procedure]
     fn configure(
@@ -92,6 +94,7 @@ trait Univ2amm: NativeAccount {
         protocol_fee: u32,
         protocol_fee_to: AccountId,
         p2id_root: Word,
+        tokenlp_asset_key: Word,
     );
 }
 
@@ -175,6 +178,10 @@ impl Univ2amm for Univ2ammStorage {
         }
     }
     fn mint(&mut self, recipient: AccountId, serial_num: Word, tag: Felt, min_lp_out: u64) {
+        assert!(
+            self.tokenlp_asset_key.get() != Word::default(),
+            "Pool not configured yet"
+        );
         let reserves = self.get_reserves();
         self.update_oracle(reserves);
         let mut amount0_in_note = 0u64;
@@ -183,10 +190,6 @@ impl Univ2amm for Univ2ammStorage {
             self.token0_asset_key(),
             self.token1_asset_key(),
             self.tokenlp_asset_key(),
-        );
-        assert!(
-            token0_asset_key.ne(&token1_asset_key),
-            "token0 must be different than token1"
         );
         for asset in active_note::get_initial_assets() {
             assert!(
@@ -245,6 +248,10 @@ impl Univ2amm for Univ2ammStorage {
         min_amount0_out: u64,
         min_amount1_out: u64,
     ) {
+        assert!(
+            self.tokenlp_asset_key.get() != Word::default(),
+            "Pool not configured yet"
+        );
         self.update_oracle(self.get_reserves());
         let (token0_asset_key, token1_asset_key, tokenlp_asset_key) = (
             self.token0_asset_key(),
@@ -293,7 +300,29 @@ impl Univ2amm for Univ2ammStorage {
         faucet::burn(asset);
         self.lp_supply.set(Felt::new_unchecked(lp_supply_after));
     }
+    fn quote_swap(&mut self, token_in_is_0: bool, amount_in: u64) -> SwapQuote {
+        let Reserves { reserve0, reserve1 } = self.get_reserves();
+        let (reserve_in, reserve_out) = if token_in_is_0 {
+            (reserve0, reserve1)
+        } else {
+            (reserve1, reserve0)
+        };
+        let fees = self.fees.get();
+        let quote = amount_out(
+            amount_in,
+            reserve_in,
+            reserve_out,
+            fees.lp_fee_bps,
+            fees.protocol_fee_bps,
+        )
+        .unwrap();
+        quote
+    }
     fn swap(&mut self, recipient: AccountId, serial_num: Word, tag: Felt, min_amount_out: u64) {
+        assert!(
+            self.tokenlp_asset_key.get() != Word::default(),
+            "Pool not configured yet"
+        );
         let reserves = self.get_reserves();
         self.update_oracle(reserves);
         let assets = active_note::get_initial_assets();
@@ -305,23 +334,19 @@ impl Univ2amm for Univ2ammStorage {
         );
         let (token0_asset_key, token1_asset_key) =
             (self.token0_asset_key(), self.token1_asset_key());
-        assert!(
-            token0_asset_key.ne(&token1_asset_key),
-            "token0 must be different than token1"
-        );
         let (token_in, token_out, reserve_in, reserve_out) = if asset.key.eq(&token0_asset_key) {
             (
                 token0_asset_key,
                 token1_asset_key,
-                reserves.reserve0(),
-                reserves.reserve1(),
+                reserves.reserve0,
+                reserves.reserve1,
             )
         } else if asset.key.eq(&token1_asset_key) {
             (
                 token1_asset_key,
                 token0_asset_key,
-                reserves.reserve1(),
-                reserves.reserve0(),
+                reserves.reserve1,
+                reserves.reserve0,
             )
         } else {
             panic!("Swap note has an asset that is neither token0 nor token1");
@@ -360,6 +385,10 @@ impl Univ2amm for Univ2ammStorage {
         self.protocol_pot.set(protocol_pot);
     }
     fn collect(&mut self, serial_num: Word) {
+        assert!(
+            self.tokenlp_asset_key.get() != Word::default(),
+            "Pool not configured yet"
+        );
         let mut protocol_pot = self.protocol_pot.get();
         let token0_amount = protocol_pot.amount0();
         let token1_amount = protocol_pot.amount1();
@@ -369,7 +398,7 @@ impl Univ2amm for Univ2ammStorage {
         );
         let (token0_asset_key, token1_asset_key) =
             (self.token0_asset_key(), self.token1_asset_key());
-        let fee_to = self.fees.get().protocol_fee_to();
+        let fee_to = self.fees.get().protocol_fee_to;
         let note_idx = self.prepare_output_note(
             fee_to,
             serial_num,
@@ -396,11 +425,33 @@ impl Univ2amm for Univ2ammStorage {
         protocol_fee_bps: u32,
         protocol_fee_to: AccountId,
         p2id_root: Word,
+        tokenlp_asset_key: Word,
     ) {
         assert!(
             active_note::get_sender().eq(&self.admin.get()),
-            "Configuration can only be changed by the admin account"
+            "Configuration can only be with the admin account"
         );
+        assert!(
+            tokenlp_asset_key.ne(&self.token1_asset_key.get()),
+            "LP token can't be an empty word"
+        );
+        assert!(
+            self.token0_asset_key.get().ne(&self.token1_asset_key.get()),
+            "token0 must be different than token1"
+        );
+        assert!(
+            tokenlp_asset_key.ne(&self.token0_asset_key.get()),
+            "LP token must be different than token0"
+        );
+        assert!(
+            tokenlp_asset_key.ne(&self.token1_asset_key.get()),
+            "LP token must be different than token1"
+        );
+        assert!(
+            protocol_fee_bps + lp_fee_bps < 10000,
+            "Total fee bps must be less than 10000"
+        );
+        self.tokenlp_asset_key.set(tokenlp_asset_key);
         self.fees.set(Fees {
             lp_fee_bps,
             protocol_fee_bps,
