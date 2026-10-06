@@ -130,16 +130,18 @@ impl Univ2ammStorage {
         let elapsed = (now - last) as u128;
         let p0 = ((reserves.reserve1 as u128) << 64) / reserves.reserve0 as u128;
         let p1 = ((reserves.reserve0 as u128) << 64) / reserves.reserve1 as u128;
+        // Saturate rather than wrap: cumulative prices are monotonic and clamp at u128::MAX,
+        // so consumers subtract two readings directly instead of doing modular arithmetic.
         let c0 = self
             .price0_cumulative_last
             .get()
             .as_u128()
-            .wrapping_add(p0.wrapping_mul(elapsed));
+            .saturating_add(p0.saturating_mul(elapsed));
         let c1 = self
             .price1_cumulative_last
             .get()
             .as_u128()
-            .wrapping_add(p1.wrapping_mul(elapsed));
+            .saturating_add(p1.saturating_mul(elapsed));
         self.price0_cumulative_last.set(U128::new(c0));
         self.price1_cumulative_last.set(U128::new(c1));
     }
