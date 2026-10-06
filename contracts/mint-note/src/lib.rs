@@ -21,9 +21,10 @@ impl MintNoteNote {
     }
 
     fn reclaim(self) {
-        for asset in active_note::get_initial_assets() {
-            todo!("How to actually call wallet?");
-        }
+        // for asset in active_note::get_initial_assets() {
+        //     todo!("How to actually call wallet?");
+        // }
+        return;
     }
 
     pub fn run_mint(self, account: &mut NativeAccount) {
