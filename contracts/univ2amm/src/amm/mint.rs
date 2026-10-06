@@ -1,7 +1,10 @@
 use crate::{
     amm::{MINIMUM_LIQUIDITY, reserves::Reserves},
     error::PoolMathError,
-    utils::math::{MAX_AMOUNT, add_amount, isqrt},
+    utils::{
+        math::{MAX_AMOUNT, add_amount, isqrt},
+        u128::div_ceil,
+    },
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -57,12 +60,18 @@ pub fn quote_mint(
                 return Err(PoolMathError::InsufficientLiquidity);
             }
             let lp_supply_after = add_amount(lp_supply, liquidity as u64)?;
-            let amount0_used: u64 = ((liquidity * reserve0 as u128) / lp_supply as u128) as u64;
-            let amount1_used: u64 = ((liquidity * reserve1 as u128) / lp_supply as u128) as u64;
+            let amount0_used: u64 =
+                div_ceil(liquidity * reserve0 as u128, lp_supply as u128) as u64;
+            let amount1_used: u64 =
+                div_ceil(liquidity * reserve1 as u128, lp_supply as u128) as u64;
             let reserve0_after = add_amount(reserve0, amount0_used)?;
             let reserve1_after = add_amount(reserve1, amount1_used)?;
-            let refund0 = amount0 - amount0_used;
-            let refund1 = amount1 - amount1_used;
+            let refund0 = amount0
+                .checked_sub(amount0_used)
+                .ok_or(PoolMathError::Invariant)?;
+            let refund1 = amount1
+                .checked_sub(amount1_used)
+                .ok_or(PoolMathError::Invariant)?;
             (
                 liquidity as u64,
                 lp_supply_after,

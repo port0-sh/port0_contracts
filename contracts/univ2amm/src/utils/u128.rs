@@ -42,3 +42,7 @@ impl WordValue for U128 {
         Ok(Self { inner: word })
     }
 }
+
+pub fn div_ceil(numerator: u128, denominator: u128) -> u128 {
+    numerator / denominator + u128::from(numerator % denominator != 0)
+}
