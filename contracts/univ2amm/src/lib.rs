@@ -23,11 +23,7 @@ use crate::{
         reserves::Reserves,
         swap::{SwapQuote, amount_out},
     },
-    utils::{
-        asset::compose_asset,
-        note::account_target_tag,
-        u128::{self, U128},
-    },
+    utils::{asset::compose_asset, math::add_amount, note::account_target_tag, u128::U128},
 };
 
 #[component_storage]
@@ -84,14 +80,14 @@ trait Univ2amm: NativeAccount {
     #[account_procedure]
     fn swap(&mut self, recipient: AccountId, serial_num: Word, tag: Felt, min_amount_out: u64);
     #[account_procedure]
-    fn quote_swap(&mut self, token_in_is_0: bool, amount_in: u64) -> SwapQuote;
+    fn quote_swap(&self, token_in_is_0: bool, amount_in: u64) -> SwapQuote;
     #[account_procedure]
     fn collect(&mut self, serial_num: Word);
     #[account_procedure]
     fn configure(
         &mut self,
-        lp_fee: u32,
-        protocol_fee: u32,
+        lp_fee: u64,
+        protocol_fee: u64,
         protocol_fee_to: AccountId,
         p2id_root: Word,
         tokenlp_asset_key: Word,
@@ -127,6 +123,7 @@ impl Univ2ammStorage {
         if now < last {
             last = now;
         }
+        self.block_timestamp_last.set(Felt::new_unchecked(now));
         if reserves.reserve0 == 0 || reserves.reserve1 == 0 {
             return;
         }
@@ -145,7 +142,6 @@ impl Univ2ammStorage {
             .wrapping_add(p1.wrapping_mul(elapsed));
         self.price0_cumulative_last.set(U128::new(c0));
         self.price1_cumulative_last.set(U128::new(c1));
-        self.block_timestamp_last.set(Felt::new_unchecked(now));
     }
 }
 
@@ -170,11 +166,15 @@ impl Univ2amm for Univ2ammStorage {
         let protocol_pot = self.protocol_pot.get();
         let token0_asset_key = self.token0_asset_key();
         let token1_asset_key = self.token1_asset_key();
+        let amount0 = active_account::get_asset(token0_asset_key)[0].as_canonical_u64();
+        let amount1 = active_account::get_asset(token1_asset_key)[0].as_canonical_u64();
+        assert!(
+            amount0 >= protocol_pot.amount0 && amount1 >= protocol_pot.amount1,
+            "Protocol pot has larger amount than balances in the vault"
+        );
         Reserves {
-            reserve0: active_account::get_asset(token0_asset_key)[0].as_canonical_u64()
-                - protocol_pot.amount0,
-            reserve1: active_account::get_asset(token1_asset_key)[0].as_canonical_u64()
-                - protocol_pot.amount1,
+            reserve0: amount0 - protocol_pot.amount0,
+            reserve1: amount1 - protocol_pot.amount1,
         }
     }
     fn mint(&mut self, recipient: AccountId, serial_num: Word, tag: Felt, min_lp_out: u64) {
@@ -300,7 +300,7 @@ impl Univ2amm for Univ2ammStorage {
         faucet::burn(asset);
         self.lp_supply.set(Felt::new_unchecked(lp_supply_after));
     }
-    fn quote_swap(&mut self, token_in_is_0: bool, amount_in: u64) -> SwapQuote {
+    fn quote_swap(&self, token_in_is_0: bool, amount_in: u64) -> SwapQuote {
         let Reserves { reserve0, reserve1 } = self.get_reserves();
         let (reserve_in, reserve_out) = if token_in_is_0 {
             (reserve0, reserve1)
@@ -421,8 +421,8 @@ impl Univ2amm for Univ2ammStorage {
     }
     fn configure(
         &mut self,
-        lp_fee_bps: u32,
-        protocol_fee_bps: u32,
+        lp_fee_bps: u64,
+        protocol_fee_bps: u64,
         protocol_fee_to: AccountId,
         p2id_root: Word,
         tokenlp_asset_key: Word,
@@ -432,8 +432,13 @@ impl Univ2amm for Univ2ammStorage {
             "Configuration can only be with the admin account"
         );
         assert!(
-            tokenlp_asset_key.ne(&self.token1_asset_key.get()),
-            "LP token can't be an empty word"
+            tokenlp_asset_key.ne(&Word::default()),
+            "LP token asset key can't be an empty word"
+        );
+        assert!(
+            self.tokenlp_asset_key.get() == Word::default()
+                || self.tokenlp_asset_key.get() == tokenlp_asset_key,
+            "LP token asset key is already set"
         );
         assert!(
             self.token0_asset_key.get().ne(&self.token1_asset_key.get()),
@@ -448,13 +453,13 @@ impl Univ2amm for Univ2ammStorage {
             "LP token must be different than token1"
         );
         assert!(
-            protocol_fee_bps + lp_fee_bps < 10000,
+            add_amount(protocol_fee_bps, lp_fee_bps).unwrap() < 10000,
             "Total fee bps must be less than 10000"
         );
         self.tokenlp_asset_key.set(tokenlp_asset_key);
         self.fees.set(Fees {
-            lp_fee_bps,
-            protocol_fee_bps,
+            lp_fee_bps: lp_fee_bps as u32,
+            protocol_fee_bps: protocol_fee_bps as u32,
             protocol_fee_to,
         });
         self.p2id_root.set(p2id_root);
