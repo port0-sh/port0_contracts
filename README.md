@@ -1,20 +1,20 @@
 # MidenXYK
 
-A constant-product AMM for the Miden rollup, modeled on Uniswap V2. A single pool holds two tokens. Liquidity providers deposit both tokens and receive LP tokens. Traders swap one token for the other. A configured protocol fee accrues to a fee recipient.
+A constant-product AMM for the Miden rollup, modeled on Uniswap V2. A single pool holds two tokens. Liquidity providers deposit both tokens and receive LP tokens. Traders swap one token for the other. A protocol fee accrues to a configured fee recipient. `ARCHITECTURE.md` describes the internal design.
 
 ## Concepts
 
 - Pool: a single account that holds token0 and token1.
-- LP token: a native fungible asset the pool mints to liquidity providers. It represents their share of the reserves.
+- LP token: a native fungible asset the pool mints on deposit and burns on withdrawal. An amount `a` of LP tokens entitles the holder to the fraction `a / lp_supply` of the reserves.
 - Roles:
   - Liquidity provider sends mint and burn notes.
   - Trader sends swap notes.
   - Admin sends the admin note to configure the pool.
   - Fee recipient sends the collect note.
 
-## How you use it
+## Usage
 
-You interact with the pool by sending notes to it. Each note script runs against the pool account and settles the operation.
+All operations are notes sent to the pool account. Each note script runs against the pool and invokes one pool procedure.
 
 1. Create the pool account. Its initial storage holds the token0 and token1 asset keys and the admin account id.
 2. The admin sends one admin note to set fees, the fee recipient, the LP token key, and the P2ID note root.
@@ -58,7 +58,7 @@ Configures the pool. Only the admin account can send it. Sets `lp_fee_bps`, `pro
 
 ## Quoting a swap
 
-`quote_swap` is an account procedure you can call by FPI. It returns the amount out for a hypothetical swap without moving assets. It is the read-only version of the swap note.
+`quote_swap` is an account procedure callable by FPI. It returns the amount out, the resulting reserves, and the protocol fee for a given input without moving assets.
 
 ## Fees
 
@@ -72,7 +72,7 @@ Their sum must stay below 10000. This differs from Uniswap V2, where the protoco
 ## Limits
 
 - Amounts, reserves, and LP supply are u64 values capped at `MAX_AMOUNT = 2^57`. The cap keeps every u128 intermediate, including the swap numerator, below `u128::MAX`.
-- The price oracle (cumulative prices and the last block timestamp) saturates at `u128::MAX` rather than wrapping.
+- The price oracle (cumulative prices and the last block timestamp) saturates at `u128::MAX`.
 
 ## Repository layout
 
