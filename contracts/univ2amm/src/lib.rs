@@ -411,13 +411,13 @@ impl Univ2amm for Univ2ammStorage {
             let asset = compose_asset(token0_asset_key, token0_amount).unwrap();
             native_account::remove_asset(asset);
             self.add_asset_to_output_note(asset, note_idx);
-            protocol_pot.resetAmount0();
+            protocol_pot.reset_amount0();
         }
         if token1_amount > 0 {
             let asset = compose_asset(token1_asset_key, token1_amount).unwrap();
             native_account::remove_asset(asset);
             self.add_asset_to_output_note(asset, note_idx);
-            protocol_pot.resetAmount1();
+            protocol_pot.reset_amount1();
         }
         self.protocol_pot.set(protocol_pot);
     }

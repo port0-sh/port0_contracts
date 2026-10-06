@@ -42,10 +42,10 @@ impl ProtocolPot {
         self.amount0 = self.amount0.checked_add(amount0).unwrap();
         self.amount1 = self.amount1.checked_add(amount1).unwrap();
     }
-    pub fn resetAmount0(&mut self) {
+    pub fn reset_amount0(&mut self) {
         self.amount0 = 0;
     }
-    pub fn resetAmount1(&mut self) {
+    pub fn reset_amount1(&mut self) {
         self.amount1 = 0;
     }
 }
