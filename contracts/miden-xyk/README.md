@@ -1,4 +1,4 @@
-# univ2amm
+# miden-xyk
 
 A Miden account contract project.
 

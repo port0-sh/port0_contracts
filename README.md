@@ -1,138 +1,108 @@
-# Miden Constant Product Pool
+# MidenXYK
 
-This repo contains a Miden Rust implementation of UniSwap V2 constant product pool.
+A constant-product AMM for the Miden rollup, modeled on Uniswap V2. A single pool holds two tokens. Liquidity providers deposit both tokens and receive LP tokens. Traders swap one token for the other. A configured protocol fee accrues to a fee recipient.
 
-## **Installation**
+## Concepts
 
-Before getting started, ensure you have the following prerequisites:
+- Pool: a single account that holds token0 and token1.
+- LP token: a native fungible asset the pool mints to liquidity providers. It represents their share of the reserves.
+- Roles:
+  - Liquidity provider sends mint and burn notes.
+  - Trader sends swap notes.
+  - Admin sends the admin note to configure the pool.
+  - Fee recipient sends the collect note.
 
-1. **Install Rust** - Make sure you have Rust installed on your system. If not, install it from [rustup.rs](https://rustup.rs/)
+## How you use it
 
-2. **Install midenup toolchain** - Follow the installation instructions at: <https://github.com/0xMiden/midenup>
+You interact with the pool by sending notes to it. Each note script runs against the pool account and settles the operation.
 
-## **Structure**
+1. Create the pool account. Its initial storage holds the token0 and token1 asset keys and the admin account id.
+2. The admin sends one admin note to set fees, the fee recipient, the LP token key, and the P2ID note root.
+3. Liquidity providers send mint notes to add liquidity and burn notes to remove it.
+4. Traders send swap notes.
+5. The fee recipient sends collect notes to withdraw protocol fees.
 
-```text
-miden-project/
-├── contracts/                   # Each contract as individual crate
-│   ├── counter-account/         # Example: Counter account contract
-│   └── increment-note/          # Example: Increment note contract
-├── integration/                 # Integration crate (scripts + tests)
-│   ├── src/
-│   │   ├── bin/                 # Rust binaries for on-chain interactions
-│   │   ├── config.rs            # Temporary config file (do not modify!)
-│   │   ├── helpers.rs           # Temporary helper file (do not modify!)
-│   │   └── lib.rs
-│   └── tests/                   # Test files
-├── Cargo.toml                   # Workspace root
-└── rust-toolchain.toml          # Temporary Rust toolchain specification
+## Notes
+
+The table lists each note, the assets it carries, and the felts it reads from note storage.
+
+| Note | Assets | Note storage (felts, in order) |
+|------|--------|-------------------------------|
+| mint-note | token0, token1 | pool id (2), recipient (2), serial (4), tag (1), deadline (1), min_lp_out (1) |
+| burn-note | LP token | pool id (2), recipient (2), serial (4), tag (1), deadline (1), min_amount0 (1), min_amount1 (1) |
+| swap-note | token0 or token1 | pool id (2), recipient (2), serial (4), tag (1), deadline (1), min_amount_out (1) |
+| collect-note | none | serial (4) |
+| admin-note | none | pool id (2), protocol_fee_to (2), lp_fee_bps (1), protocol_fee_bps (1), p2id_root (4), LP token key (4) |
+
+Account ids are two felts, prefix then suffix. `deadline` is a block timestamp; the note reverts if the pool executes it after that time. The `min_*` fields bound slippage.
+
+### mint-note
+
+Deposit token0 and token1. The pool mints LP tokens to the recipient. The first mint locks 1000 LP tokens permanently. If the deposited ratio differs from the pool ratio, the pool refunds the excess of one token to the recipient.
+
+### burn-note
+
+Burn LP tokens. The pool returns a proportional share of both reserves to the recipient.
+
+### swap-note
+
+Send one token. The pool pays out the other token, less fees. `min_amount_out` reverts the trade if the output would be smaller.
+
+### collect-note
+
+Withdraws the accumulated protocol fee to the configured fee recipient. Reverts if the fee pot is empty.
+
+### admin-note
+
+Configures the pool. Only the admin account can send it. Sets `lp_fee_bps`, `protocol_fee_bps`, the fee recipient, the LP token key, and the P2ID note root used for output notes.
+
+## Quoting a swap
+
+`quote_swap` is an account procedure you can call by FPI. It returns the amount out for a hypothetical swap without moving assets. It is the read-only version of the swap note.
+
+## Fees
+
+The admin configures two basis-point fees:
+
+- `lp_fee_bps` goes to liquidity providers.
+- `protocol_fee_bps` is taken from the input first; the LP fee applies to the remainder.
+
+Their sum must stay below 10000. This differs from Uniswap V2, where the protocol fee is a fraction of the LP fee.
+
+## Limits
+
+- Amounts, reserves, and LP supply are u64 values capped at `MAX_AMOUNT = 2^57`. The cap keeps every u128 intermediate, including the swap numerator, below `u128::MAX`.
+- The price oracle (cumulative prices and the last block timestamp) saturates at `u128::MAX` rather than wrapping.
+
+## Repository layout
+
+```
+contracts/
+  miden-xyk/      pool account component
+  mint-note/      add-liquidity note script
+  burn-note/      remove-liquidity note script
+  swap-note/      swap note script
+  collect-note/   protocol-fee collection note script
+  admin-note/     pool configuration note script
+integration/      MockChain integration tests
 ```
 
-## **Design Philosophy**
+## Build
 
-This workspace follows a clean separation of concerns:
+Each contract is a standalone crate built with cargo-miden:
 
-### **Contracts Folder - Miden Development**
-
-The `contracts/` folder is your primary working directory when writing Miden smart contract code. Each contract is organized as its own individual crate, allowing for:
-
-- Independent versioning and dependencies
-- Clear isolation between different contracts
-- Easy contract management and modularization
-
-When you're working on Miden Rust code (writing smart contracts), you'll be working in the `contracts/` directory.
-
-### **Integration Crate - Scripts and Testing**
-
-The `integration/` crate is your working directory for interacting with compiled contracts. All on-chain interactions, scripts, and tests are housed within this single crate. This includes:
-
-- **Binaries** (`src/bin/`): Rust executables for deploying and interacting with your contracts on-chain
-- **Tests** (`tests/`): Integration tests for validating your contract behavior
-
-This structure provides flexibility as your application grows, allowing you to add custom dependencies, sophisticated tooling, and independent configuration specific to your deployment and testing needs.
-
-> **Important Note**: The `helpers.rs` file inside the `integration/` crate is temporary and exists only to facilitate current development workflows. **Do not modify this file unless you know what you are doing!** It will be removed in future versions.
-
-## **Adding New Contracts**
-
-To create a new contract crate, run the following command from the workspace root:
-
-```bash
-miden new --account contracts/my-account
+```
+cargo miden build --manifest-path contracts/miden-xyk/Cargo.toml --release
 ```
 
-This will scaffold a new contract crate inside the `contracts/` directory with all the necessary boilerplate.
+## Test
 
-## **Adding Binaries for On-Chain Interactions**
-
-Binaries are used for deploying contracts and performing on-chain interactions. To add a new binary:
-
-1. Create a new `.rs` file in `integration/src/bin/` (e.g., `deploy_contract.rs`)
-2. Write your binary code as a standard Rust executable with a `main()` function
-3. Run the binary using the commands shown below
-
-## **Testing Your Contracts**
-
-Tests are located in `integration/tests/`. To add a new test:
-
-1. Create a new test file in `integration/tests/` (e.g., `my_contract_test.rs`)
-2. Write your test functions using the standard Rust testing framework
-3. Run tests using the commands shown below
-
-## **Commands**
-
-### Compile a Contract
-
-```bash
-# Compile a specific contract
-miden build --manifest-path contracts/counter-account/Cargo.toml
-
-# Or navigate to the contract directory
-cd contracts/counter-account
-miden build
+```
+cargo test -p integration --release
 ```
 
-Each contract also has a thin `build.rs` that delegates to
-`miden-sdk-build-script-support`, keeping plain `cargo check` and IDE analysis working. The
-helper populates the Miden package cache with the contract's compiled dependencies, so the SDK
-macros resolve them without a manual build. It needs `cargo miden` on `PATH` (or a binary named
-by the `CARGO_MIDEN` environment variable).
+Tests run against MockChain, an in-process chain that compiles the contracts and executes the note flows without a network.
 
-### Run a Binary
+## License
 
-```bash
-# Navigate to integration crate and run a binary
-cd integration
-cargo run --bin increment_count
-```
-
-### Run Tests
-
-```bash
-# Navigate to integration crate and run tests
-cd integration
-cargo test                      # Run all tests
-cargo test counter_test         # Run specific test file
-```
-
-## **Extending the Workspace**
-
-If you need to extend the workspace with new crates (for example, to add libraries or additional tools), it is recommended to add these new crates in the root of the project directory. This helps keep the project structure clean and makes it easier to manage dependencies and workspace configuration.
-
-To add a new crate to the workspace:
-
-1. From the project root, run:
-   ```bash
-   cargo new my-new-crate
-   ```
-2. Then add the crate path (e.g., `my-new-crate`) to the `[workspace].members` section of your `Cargo.toml`.
-
-**Note:** Avoid adding new crates as subdirectories under `contracts/` or `integration/`, unless they are intended to be contract crates or part of integration specifically. Keeping new crates at the root makes the project easier to understand and maintain.
-
-## AI Developer Experience
-
-This template includes resources for AI-assisted development:
-- `CLAUDE.md` — Project context loaded automatically by Claude Code
-- `.cursorrules` — Project-level guidance for Cursor
-- `.claude/skills/` — On-demand skill files for Miden SDK patterns, pitfalls, testing, and source exploration
-- `.claude/hooks/build-contracts.sh` — Automatic build verification after contract edits
+MIT. See `LICENSE`.

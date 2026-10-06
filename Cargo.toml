@@ -6,7 +6,7 @@ members = [
   "contracts/collect-note",
   "contracts/mint-note",
   "contracts/swap-note",
-  "contracts/univ2amm",
+  "contracts/miden-xyk",
   "integration"
 ]
 exclude = [

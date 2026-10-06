@@ -10,4 +10,4 @@ namespace = "miden:burn-note/miden-burn-note@0.1.0"
 [dependencies]
 miden-core = "*"
 miden-protocol = "*"
-univ2amm = { path = "../univ2amm" }
+miden-xyk = { path = "../miden-xyk" }

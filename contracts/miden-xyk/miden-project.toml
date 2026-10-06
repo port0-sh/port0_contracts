@@ -1,5 +1,5 @@
 [package]
-name = "univ2amm"
+name = "miden-xyk"
 version = "0.1.0"
 
 [package.metadata.miden]
@@ -7,7 +7,7 @@ version = "0.1.0"
 [lib]
 path = "src/lib.rs"
 kind = "account-component"
-namespace = "miden:univ2amm/univ2amm@0.1.0"
+namespace = "miden:miden-xyk/miden-xyk@0.1.0"
 
 [dependencies]
 miden-core = "*"

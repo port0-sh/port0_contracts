@@ -27,7 +27,7 @@ use crate::{
 };
 
 #[component_storage]
-struct Univ2ammStorage {
+struct MidenXykStorage {
     #[storage(description = "LP token asset key")]
     tokenlp_asset_key: StorageValue<Word>,
     #[storage(description = "token0 asset key")]
@@ -53,7 +53,7 @@ struct Univ2ammStorage {
 }
 
 #[component]
-trait Univ2amm: NativeAccount {
+trait MidenXyk: NativeAccount {
     #[account_procedure]
     fn tokenlp_asset_key(&self) -> Word;
     #[account_procedure]
@@ -94,7 +94,7 @@ trait Univ2amm: NativeAccount {
     );
 }
 
-impl Univ2ammStorage {
+impl MidenXykStorage {
     fn add_asset_to_output_note(&mut self, asset: Asset, note_idx: NoteIdx) {
         output_note::add_asset(asset, note_idx);
     }
@@ -148,7 +148,7 @@ impl Univ2ammStorage {
 }
 
 #[component]
-impl Univ2amm for Univ2ammStorage {
+impl MidenXyk for MidenXykStorage {
     fn tokenlp_asset_key(&self) -> Word {
         self.tokenlp_asset_key.get()
     }

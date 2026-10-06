@@ -3,7 +3,7 @@
 
 use miden::*;
 
-#[account(univ2amm::Univ2amm)]
+#[account(miden_xyk::MidenXyk)]
 pub struct NativeAccount;
 
 #[note]
