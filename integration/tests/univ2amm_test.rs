@@ -268,6 +268,20 @@ fn read_scalar(mock_chain: &MockChain, pool: AccountId, field: &str) -> Result<u
     Ok(word[0].as_canonical_u64())
 }
 
+/// Reads a full `Word` from a value storage slot.
+fn read_word(mock_chain: &MockChain, pool: AccountId, field: &str) -> Result<Word> {
+    let account = mock_chain.committed_account(pool)?;
+    Ok(account.storage().get_item(&slot(field))?)
+}
+
+/// Reconstructs the `u128` stored in the contract's `U128` limb layout (little-endian 32-bit limbs).
+fn word_to_u128(w: Word) -> u128 {
+    (w[0].as_canonical_u64() as u128)
+        | ((w[1].as_canonical_u64() as u128) << 32)
+        | ((w[2].as_canonical_u64() as u128) << 64)
+        | ((w[3].as_canonical_u64() as u128) << 96)
+}
+
 #[tokio::test]
 async fn configure_sets_pool_parameters() -> Result<()> {
     let contracts = Contracts::build()?;
@@ -789,5 +803,646 @@ async fn configure_rejects_non_admin() -> Result<()> {
         .await;
 
     assert!(result.is_err(), "configure by a non-admin should fail");
+    Ok(())
+}
+
+#[tokio::test]
+async fn burn_below_minimum_liquidity_fails() -> Result<()> {
+    let contracts = Contracts::build()?;
+    let mut builder = MockChain::builder();
+
+    let token0_faucet =
+        builder.add_existing_basic_faucet(basic_auth(), "ALPHA", 2_000_000, Some(2_000_000))?;
+    let token1_faucet =
+        builder.add_existing_basic_faucet(basic_auth(), "BETA", 2_000_000, Some(2_000_000))?;
+    let admin = builder.add_existing_wallet(basic_auth())?;
+
+    let token0_key = FungibleAsset::new(token0_faucet.id(), 1)?.to_id_word();
+    let token1_key = FungibleAsset::new(token1_faucet.id(), 1)?.to_id_word();
+
+    let amount0 = 1_000_000_u64;
+    let amount1 = 1_000_000_u64;
+    let pool = add_pool_account(
+        &mut builder,
+        contracts.univ2amm.clone(),
+        token0_key,
+        token1_key,
+        admin.id(),
+        vec![],
+    )?;
+
+    // The LP supplies both tokens and holds one LP token more than the burn cap allows.
+    let lp = builder.add_existing_wallet_with_assets(
+        basic_auth(),
+        [
+            FungibleAsset::new(token0_faucet.id(), amount0)?.into(),
+            FungibleAsset::new(token1_faucet.id(), amount1)?.into(),
+            FungibleAsset::new(pool, 999_001)?.into(),
+        ],
+    )?;
+
+    let lp_key = FungibleAsset::new(pool, 1)?.to_id_word();
+    let p2id_root = Word::from(P2idNote::script_root());
+
+    let admin_note = build_note(
+        contracts.admin_note.clone(),
+        admin.id(),
+        admin_note_storage(pool, admin.id(), LP_FEE_BPS, PROTOCOL_FEE_BPS, p2id_root, lp_key),
+        vec![],
+    )?;
+
+    let mut mint_storage = pool_note_prefix(pool, lp.id(), serial_num(), Felt::ZERO);
+    mint_storage.push(Felt::ZERO); // min_lp_out
+    let mint_note = build_note(
+        contracts.mint_note.clone(),
+        lp.id(),
+        mint_storage,
+        vec![
+            FungibleAsset::new(token0_faucet.id(), amount0)?.into(),
+            FungibleAsset::new(token1_faucet.id(), amount1)?.into(),
+        ],
+    )?;
+
+    let burn_serial =
+        Word::from([Felt::from(9_u8), Felt::from(8_u8), Felt::from(7_u8), Felt::from(6_u8)]);
+    let mut burn_storage = pool_note_prefix(pool, lp.id(), burn_serial, Felt::ZERO);
+    burn_storage.push(Felt::ZERO); // min_amount0
+    burn_storage.push(Felt::ZERO); // min_amount1
+    let burn_note = build_note(
+        contracts.burn_note.clone(),
+        lp.id(),
+        burn_storage,
+        vec![FungibleAsset::new(pool, 999_001)?.into()],
+    )?;
+
+    builder.add_output_note(RawOutputNote::Full(admin_note.clone()));
+    builder.add_output_note(RawOutputNote::Full(mint_note.clone()));
+    builder.add_output_note(RawOutputNote::Full(burn_note.clone()));
+
+    let mut mock_chain = builder.build()?;
+    consume_note(&mut mock_chain, pool, &admin_note).await?;
+    consume_note(&mut mock_chain, pool, &mint_note).await?;
+
+    let result = mock_chain
+        .build_transaction(pool)
+        .authenticated_input_note(burn_note.id())
+        .build()?
+        .execute()
+        .await;
+
+    assert!(
+        result.is_err(),
+        "burning into the locked MINIMUM_LIQUIDITY should fail"
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn second_mint_is_pro_rata_and_refunds_excess() -> Result<()> {
+    let contracts = Contracts::build()?;
+    let mut builder = MockChain::builder();
+
+    let token0_faucet =
+        builder.add_existing_basic_faucet(basic_auth(), "ALPHA", 2_000_000, Some(2_000_000))?;
+    let token1_faucet =
+        builder.add_existing_basic_faucet(basic_auth(), "BETA", 2_000_000, Some(2_000_000))?;
+    let admin = builder.add_existing_wallet(basic_auth())?;
+
+    let token0_key = FungibleAsset::new(token0_faucet.id(), 1)?.to_id_word();
+    let token1_key = FungibleAsset::new(token1_faucet.id(), 1)?.to_id_word();
+
+    // First mint deposits 1e6/1e6; second mint deposits 200_000/100_000 (unequal ratio).
+    let lp = builder.add_existing_wallet_with_assets(
+        basic_auth(),
+        [
+            FungibleAsset::new(token0_faucet.id(), 1_200_000)?.into(),
+            FungibleAsset::new(token1_faucet.id(), 1_100_000)?.into(),
+        ],
+    )?;
+
+    let pool = add_pool_account(
+        &mut builder,
+        contracts.univ2amm.clone(),
+        token0_key,
+        token1_key,
+        admin.id(),
+        vec![],
+    )?;
+
+    let lp_key = FungibleAsset::new(pool, 1)?.to_id_word();
+    let p2id_root = Word::from(P2idNote::script_root());
+
+    let admin_note = build_note(
+        contracts.admin_note.clone(),
+        admin.id(),
+        admin_note_storage(pool, admin.id(), LP_FEE_BPS, PROTOCOL_FEE_BPS, p2id_root, lp_key),
+        vec![],
+    )?;
+
+    let mut first_storage = pool_note_prefix(pool, lp.id(), serial_num(), Felt::ZERO);
+    first_storage.push(Felt::ZERO); // min_lp_out
+    let first_mint = build_note(
+        contracts.mint_note.clone(),
+        lp.id(),
+        first_storage,
+        vec![
+            FungibleAsset::new(token0_faucet.id(), 1_000_000)?.into(),
+            FungibleAsset::new(token1_faucet.id(), 1_000_000)?.into(),
+        ],
+    )?;
+
+    let second_serial =
+        Word::from([Felt::from(5_u8), Felt::from(6_u8), Felt::from(7_u8), Felt::from(8_u8)]);
+    let mut second_storage = pool_note_prefix(pool, lp.id(), second_serial, Felt::ZERO);
+    second_storage.push(Felt::ZERO); // min_lp_out
+    let second_mint = build_note(
+        contracts.mint_note.clone(),
+        lp.id(),
+        second_storage,
+        vec![
+            FungibleAsset::new(token0_faucet.id(), 200_000)?.into(),
+            FungibleAsset::new(token1_faucet.id(), 100_000)?.into(),
+        ],
+    )?;
+
+    builder.add_output_note(RawOutputNote::Full(admin_note.clone()));
+    builder.add_output_note(RawOutputNote::Full(first_mint.clone()));
+    builder.add_output_note(RawOutputNote::Full(second_mint.clone()));
+
+    let mut mock_chain = builder.build()?;
+    consume_note(&mut mock_chain, pool, &admin_note).await?;
+    consume_note(&mut mock_chain, pool, &first_mint).await?;
+
+    let executed = mock_chain
+        .build_transaction(pool)
+        .authenticated_input_note(second_mint.id())
+        .build()?
+        .execute()
+        .await?;
+    mock_chain.add_pending_executed_transaction(&executed)?;
+    mock_chain.prove_next_block()?;
+
+    // liquidity = min(200_000 * L / 1e6, 100_000 * L / 1e6) = 100_000; 100_000 of each token used,
+    // so token0 gets a 100_000 refund and both reserves and lp_supply grow by 100_000.
+    assert_eq!(
+        vault_balance(&mock_chain, pool, token0_faucet.id(), 0)?,
+        1_100_000,
+        "token0 vault mismatch"
+    );
+    assert_eq!(
+        vault_balance(&mock_chain, pool, token1_faucet.id(), 0)?,
+        1_100_000,
+        "token1 vault mismatch"
+    );
+    assert_eq!(
+        read_scalar(&mock_chain, pool, "lp_supply")?,
+        1_100_000,
+        "lp supply mismatch"
+    );
+    assert_eq!(executed.output_notes().num_notes(), 1, "expected one LP output note");
+    Ok(())
+}
+
+#[tokio::test]
+async fn swap_token1_to_token0() -> Result<()> {
+    let contracts = Contracts::build()?;
+    let mut builder = MockChain::builder();
+
+    let token0_faucet =
+        builder.add_existing_basic_faucet(basic_auth(), "ALPHA", 2_000_000, Some(2_000_000))?;
+    let token1_faucet =
+        builder.add_existing_basic_faucet(basic_auth(), "BETA", 2_000_000, Some(2_000_000))?;
+    let admin = builder.add_existing_wallet(basic_auth())?;
+    let trader = builder.add_existing_wallet_with_assets(
+        basic_auth(),
+        [FungibleAsset::new(token1_faucet.id(), 10_000)?.into()],
+    )?;
+
+    let token0_key = FungibleAsset::new(token0_faucet.id(), 1)?.to_id_word();
+    let token1_key = FungibleAsset::new(token1_faucet.id(), 1)?.to_id_word();
+
+    let reserve0 = 1_000_000_u64;
+    let reserve1 = 1_000_000_u64;
+    let pool = add_pool_account(
+        &mut builder,
+        contracts.univ2amm.clone(),
+        token0_key,
+        token1_key,
+        admin.id(),
+        vec![
+            FungibleAsset::new(token0_faucet.id(), reserve0)?.into(),
+            FungibleAsset::new(token1_faucet.id(), reserve1)?.into(),
+        ],
+    )?;
+
+    let lp_key = FungibleAsset::new(pool, 1)?.to_id_word();
+    let p2id_root = Word::from(P2idNote::script_root());
+
+    let admin_note = build_note(
+        contracts.admin_note.clone(),
+        admin.id(),
+        admin_note_storage(pool, admin.id(), LP_FEE_BPS, PROTOCOL_FEE_BPS, p2id_root, lp_key),
+        vec![],
+    )?;
+
+    let amount_in = 10_000_u64;
+    let mut swap_storage = pool_note_prefix(pool, trader.id(), serial_num(), Felt::ZERO);
+    swap_storage.push(Felt::ZERO); // min_amount_out
+    let swap_note = build_note(
+        contracts.swap_note.clone(),
+        trader.id(),
+        swap_storage,
+        vec![FungibleAsset::new(token1_faucet.id(), amount_in)?.into()],
+    )?;
+
+    builder.add_output_note(RawOutputNote::Full(admin_note.clone()));
+    builder.add_output_note(RawOutputNote::Full(swap_note.clone()));
+
+    let mut mock_chain = builder.build()?;
+    consume_note(&mut mock_chain, pool, &admin_note).await?;
+    consume_note(&mut mock_chain, pool, &swap_note).await?;
+
+    let (amount_out, protocol_fee) =
+        amount_out(amount_in, reserve1, reserve0, LP_FEE_BPS, PROTOCOL_FEE_BPS);
+
+    assert_eq!(
+        vault_balance(&mock_chain, pool, token0_faucet.id(), 0)?,
+        reserve0 - amount_out,
+        "token0 vault mismatch"
+    );
+    assert_eq!(
+        vault_balance(&mock_chain, pool, token1_faucet.id(), 0)?,
+        reserve1 + amount_in,
+        "token1 vault mismatch"
+    );
+
+    let account = mock_chain.committed_account(pool)?;
+    let pot = account.storage().get_item(&slot("protocol_pot"))?;
+    assert_eq!(pot[0].as_canonical_u64(), 0, "protocol pot amount0 mismatch");
+    assert_eq!(pot[1].as_canonical_u64(), protocol_fee, "protocol pot amount1 mismatch");
+    Ok(())
+}
+
+#[tokio::test]
+async fn swap_with_slippage_rejected() -> Result<()> {
+    let contracts = Contracts::build()?;
+    let mut builder = MockChain::builder();
+
+    let token0_faucet =
+        builder.add_existing_basic_faucet(basic_auth(), "ALPHA", 2_000_000, Some(2_000_000))?;
+    let token1_faucet =
+        builder.add_existing_basic_faucet(basic_auth(), "BETA", 2_000_000, Some(2_000_000))?;
+    let admin = builder.add_existing_wallet(basic_auth())?;
+    let trader = builder.add_existing_wallet_with_assets(
+        basic_auth(),
+        [FungibleAsset::new(token0_faucet.id(), 10_000)?.into()],
+    )?;
+
+    let token0_key = FungibleAsset::new(token0_faucet.id(), 1)?.to_id_word();
+    let token1_key = FungibleAsset::new(token1_faucet.id(), 1)?.to_id_word();
+
+    let pool = add_pool_account(
+        &mut builder,
+        contracts.univ2amm.clone(),
+        token0_key,
+        token1_key,
+        admin.id(),
+        vec![
+            FungibleAsset::new(token0_faucet.id(), 1_000_000)?.into(),
+            FungibleAsset::new(token1_faucet.id(), 1_000_000)?.into(),
+        ],
+    )?;
+
+    let lp_key = FungibleAsset::new(pool, 1)?.to_id_word();
+    let p2id_root = Word::from(P2idNote::script_root());
+
+    let admin_note = build_note(
+        contracts.admin_note.clone(),
+        admin.id(),
+        admin_note_storage(pool, admin.id(), LP_FEE_BPS, PROTOCOL_FEE_BPS, p2id_root, lp_key),
+        vec![],
+    )?;
+
+    let mut swap_storage = pool_note_prefix(pool, trader.id(), serial_num(), Felt::ZERO);
+    swap_storage.push(Felt::new(999_999)?); // min_amount_out is way above what the pool can pay
+    let swap_note = build_note(
+        contracts.swap_note.clone(),
+        trader.id(),
+        swap_storage,
+        vec![FungibleAsset::new(token0_faucet.id(), 10_000)?.into()],
+    )?;
+
+    builder.add_output_note(RawOutputNote::Full(admin_note.clone()));
+    builder.add_output_note(RawOutputNote::Full(swap_note.clone()));
+
+    let mut mock_chain = builder.build()?;
+    consume_note(&mut mock_chain, pool, &admin_note).await?;
+
+    let result = mock_chain
+        .build_transaction(pool)
+        .authenticated_input_note(swap_note.id())
+        .build()?
+        .execute()
+        .await;
+
+    assert!(result.is_err(), "swap below min_amount_out should fail");
+    Ok(())
+}
+
+#[tokio::test]
+async fn swap_without_liquidity_fails() -> Result<()> {
+    let contracts = Contracts::build()?;
+    let mut builder = MockChain::builder();
+
+    let token0_faucet =
+        builder.add_existing_basic_faucet(basic_auth(), "ALPHA", 1_000_000, Some(1_000_000))?;
+    let token1_faucet =
+        builder.add_existing_basic_faucet(basic_auth(), "BETA", 1_000_000, Some(1_000_000))?;
+    let admin = builder.add_existing_wallet(basic_auth())?;
+    let trader = builder.add_existing_wallet_with_assets(
+        basic_auth(),
+        [FungibleAsset::new(token0_faucet.id(), 10_000)?.into()],
+    )?;
+
+    let token0_key = FungibleAsset::new(token0_faucet.id(), 1)?.to_id_word();
+    let token1_key = FungibleAsset::new(token1_faucet.id(), 1)?.to_id_word();
+
+    // Pool is configured but holds no reserves.
+    let pool = add_pool_account(
+        &mut builder,
+        contracts.univ2amm.clone(),
+        token0_key,
+        token1_key,
+        admin.id(),
+        vec![],
+    )?;
+
+    let lp_key = FungibleAsset::new(pool, 1)?.to_id_word();
+    let p2id_root = Word::from(P2idNote::script_root());
+
+    let admin_note = build_note(
+        contracts.admin_note.clone(),
+        admin.id(),
+        admin_note_storage(pool, admin.id(), LP_FEE_BPS, PROTOCOL_FEE_BPS, p2id_root, lp_key),
+        vec![],
+    )?;
+
+    let mut swap_storage = pool_note_prefix(pool, trader.id(), serial_num(), Felt::ZERO);
+    swap_storage.push(Felt::ZERO);
+    let swap_note = build_note(
+        contracts.swap_note.clone(),
+        trader.id(),
+        swap_storage,
+        vec![FungibleAsset::new(token0_faucet.id(), 10_000)?.into()],
+    )?;
+
+    builder.add_output_note(RawOutputNote::Full(admin_note.clone()));
+    builder.add_output_note(RawOutputNote::Full(swap_note.clone()));
+
+    let mut mock_chain = builder.build()?;
+    consume_note(&mut mock_chain, pool, &admin_note).await?;
+
+    let result = mock_chain
+        .build_transaction(pool)
+        .authenticated_input_note(swap_note.id())
+        .build()?
+        .execute()
+        .await;
+
+    assert!(result.is_err(), "swap against an empty pool should fail");
+    Ok(())
+}
+
+#[tokio::test]
+async fn swap_with_protocol_fee_off() -> Result<()> {
+    let contracts = Contracts::build()?;
+    let mut builder = MockChain::builder();
+
+    let token0_faucet =
+        builder.add_existing_basic_faucet(basic_auth(), "ALPHA", 2_000_000, Some(2_000_000))?;
+    let token1_faucet =
+        builder.add_existing_basic_faucet(basic_auth(), "BETA", 2_000_000, Some(2_000_000))?;
+    let admin = builder.add_existing_wallet(basic_auth())?;
+    let trader = builder.add_existing_wallet_with_assets(
+        basic_auth(),
+        [FungibleAsset::new(token0_faucet.id(), 10_000)?.into()],
+    )?;
+
+    let token0_key = FungibleAsset::new(token0_faucet.id(), 1)?.to_id_word();
+    let token1_key = FungibleAsset::new(token1_faucet.id(), 1)?.to_id_word();
+
+    let reserve0 = 1_000_000_u64;
+    let reserve1 = 1_000_000_u64;
+    let pool = add_pool_account(
+        &mut builder,
+        contracts.univ2amm.clone(),
+        token0_key,
+        token1_key,
+        admin.id(),
+        vec![
+            FungibleAsset::new(token0_faucet.id(), reserve0)?.into(),
+            FungibleAsset::new(token1_faucet.id(), reserve1)?.into(),
+        ],
+    )?;
+
+    let lp_key = FungibleAsset::new(pool, 1)?.to_id_word();
+    let p2id_root = Word::from(P2idNote::script_root());
+
+    // protocol_fee_bps = 0: the full fee goes to LPs and the protocol pot stays empty.
+    let admin_note = build_note(
+        contracts.admin_note.clone(),
+        admin.id(),
+        admin_note_storage(pool, admin.id(), LP_FEE_BPS, 0, p2id_root, lp_key),
+        vec![],
+    )?;
+
+    let amount_in = 10_000_u64;
+    let mut swap_storage = pool_note_prefix(pool, trader.id(), serial_num(), Felt::ZERO);
+    swap_storage.push(Felt::ZERO);
+    let swap_note = build_note(
+        contracts.swap_note.clone(),
+        trader.id(),
+        swap_storage,
+        vec![FungibleAsset::new(token0_faucet.id(), amount_in)?.into()],
+    )?;
+
+    builder.add_output_note(RawOutputNote::Full(admin_note.clone()));
+    builder.add_output_note(RawOutputNote::Full(swap_note.clone()));
+
+    let mut mock_chain = builder.build()?;
+    consume_note(&mut mock_chain, pool, &admin_note).await?;
+    consume_note(&mut mock_chain, pool, &swap_note).await?;
+
+    let (amount_out, _) = amount_out(amount_in, reserve0, reserve1, LP_FEE_BPS, 0);
+
+    assert_eq!(
+        vault_balance(&mock_chain, pool, token0_faucet.id(), 0)?,
+        reserve0 + amount_in,
+        "token0 vault mismatch"
+    );
+    assert_eq!(
+        vault_balance(&mock_chain, pool, token1_faucet.id(), 0)?,
+        reserve1 - amount_out,
+        "token1 vault mismatch"
+    );
+
+    let account = mock_chain.committed_account(pool)?;
+    let pot = account.storage().get_item(&slot("protocol_pot"))?;
+    assert_eq!(pot[0].as_canonical_u64(), 0, "protocol pot should be empty");
+    assert_eq!(pot[1].as_canonical_u64(), 0, "protocol pot should be empty");
+    Ok(())
+}
+
+#[tokio::test]
+async fn mint_requires_both_tokens() -> Result<()> {
+    let contracts = Contracts::build()?;
+    let mut builder = MockChain::builder();
+
+    let token0_faucet =
+        builder.add_existing_basic_faucet(basic_auth(), "ALPHA", 1_000_000, Some(1_000_000))?;
+    let token1_faucet =
+        builder.add_existing_basic_faucet(basic_auth(), "BETA", 1_000_000, Some(1_000_000))?;
+    let admin = builder.add_existing_wallet(basic_auth())?;
+    let lp = builder.add_existing_wallet_with_assets(
+        basic_auth(),
+        [FungibleAsset::new(token0_faucet.id(), 1_000)?.into()],
+    )?;
+
+    let token0_key = FungibleAsset::new(token0_faucet.id(), 1)?.to_id_word();
+    let token1_key = FungibleAsset::new(token1_faucet.id(), 1)?.to_id_word();
+
+    let pool = add_pool_account(
+        &mut builder,
+        contracts.univ2amm.clone(),
+        token0_key,
+        token1_key,
+        admin.id(),
+        vec![],
+    )?;
+
+    let lp_key = FungibleAsset::new(pool, 1)?.to_id_word();
+    let p2id_root = Word::from(P2idNote::script_root());
+
+    let admin_note = build_note(
+        contracts.admin_note.clone(),
+        admin.id(),
+        admin_note_storage(pool, admin.id(), LP_FEE_BPS, PROTOCOL_FEE_BPS, p2id_root, lp_key),
+        vec![],
+    )?;
+
+    // The mint note carries only token0, so amount1 is zero and the mint must revert.
+    let mut mint_storage = pool_note_prefix(pool, lp.id(), serial_num(), Felt::ZERO);
+    mint_storage.push(Felt::ZERO);
+    let mint_note = build_note(
+        contracts.mint_note.clone(),
+        lp.id(),
+        mint_storage,
+        vec![FungibleAsset::new(token0_faucet.id(), 1_000)?.into()],
+    )?;
+
+    builder.add_output_note(RawOutputNote::Full(admin_note.clone()));
+    builder.add_output_note(RawOutputNote::Full(mint_note.clone()));
+
+    let mut mock_chain = builder.build()?;
+    consume_note(&mut mock_chain, pool, &admin_note).await?;
+
+    let result = mock_chain
+        .build_transaction(pool)
+        .authenticated_input_note(mint_note.id())
+        .build()?
+        .execute()
+        .await;
+
+    assert!(result.is_err(), "mint with only one token should fail");
+    Ok(())
+}
+
+#[tokio::test]
+async fn oracle_updates_price_cumulative() -> Result<()> {
+    let contracts = Contracts::build()?;
+    let mut builder = MockChain::builder();
+
+    let token0_faucet =
+        builder.add_existing_basic_faucet(basic_auth(), "ALPHA", 2_000_000, Some(2_000_000))?;
+    let token1_faucet =
+        builder.add_existing_basic_faucet(basic_auth(), "BETA", 2_000_000, Some(2_000_000))?;
+    let admin = builder.add_existing_wallet(basic_auth())?;
+
+    let lp = builder.add_existing_wallet_with_assets(
+        basic_auth(),
+        [
+            FungibleAsset::new(token0_faucet.id(), 1_000_000)?.into(),
+            FungibleAsset::new(token1_faucet.id(), 1_000_000)?.into(),
+        ],
+    )?;
+    let trader = builder.add_existing_wallet_with_assets(
+        basic_auth(),
+        [FungibleAsset::new(token0_faucet.id(), 10_000)?.into()],
+    )?;
+
+    let token0_key = FungibleAsset::new(token0_faucet.id(), 1)?.to_id_word();
+    let token1_key = FungibleAsset::new(token1_faucet.id(), 1)?.to_id_word();
+
+    let pool = add_pool_account(
+        &mut builder,
+        contracts.univ2amm.clone(),
+        token0_key,
+        token1_key,
+        admin.id(),
+        vec![],
+    )?;
+
+    let lp_key = FungibleAsset::new(pool, 1)?.to_id_word();
+    let p2id_root = Word::from(P2idNote::script_root());
+
+    let admin_note = build_note(
+        contracts.admin_note.clone(),
+        admin.id(),
+        admin_note_storage(pool, admin.id(), LP_FEE_BPS, PROTOCOL_FEE_BPS, p2id_root, lp_key),
+        vec![],
+    )?;
+
+    let mut mint_storage = pool_note_prefix(pool, lp.id(), serial_num(), Felt::ZERO);
+    mint_storage.push(Felt::ZERO);
+    let mint_note = build_note(
+        contracts.mint_note.clone(),
+        lp.id(),
+        mint_storage,
+        vec![
+            FungibleAsset::new(token0_faucet.id(), 1_000_000)?.into(),
+            FungibleAsset::new(token1_faucet.id(), 1_000_000)?.into(),
+        ],
+    )?;
+
+    let mut swap_storage = pool_note_prefix(pool, trader.id(), serial_num(), Felt::ZERO);
+    swap_storage.push(Felt::ZERO);
+    let swap_note = build_note(
+        contracts.swap_note.clone(),
+        trader.id(),
+        swap_storage,
+        vec![FungibleAsset::new(token0_faucet.id(), 10_000)?.into()],
+    )?;
+
+    builder.add_output_note(RawOutputNote::Full(admin_note.clone()));
+    builder.add_output_note(RawOutputNote::Full(mint_note.clone()));
+    builder.add_output_note(RawOutputNote::Full(swap_note.clone()));
+
+    let mut mock_chain = builder.build()?;
+    consume_note(&mut mock_chain, pool, &admin_note).await?;
+    consume_note(&mut mock_chain, pool, &mint_note).await?;
+    consume_note(&mut mock_chain, pool, &swap_note).await?;
+
+    // The first mint only records the timestamp (reserves were 0). The swap then accrues
+    // `price * elapsed` over one 10-second block step at reserves 1e6/1e6, where price = 2^64.
+    let expected = 10u128 << 64;
+    let p0 = read_word(&mock_chain, pool, "price0_cumulative_last")?;
+    let p1 = read_word(&mock_chain, pool, "price1_cumulative_last")?;
+    assert_eq!(word_to_u128(p0), expected, "price0 cumulative mismatch");
+    assert_eq!(word_to_u128(p1), expected, "price1 cumulative mismatch");
+    assert_eq!(
+        read_scalar(&mock_chain, pool, "block_timestamp_last")?,
+        1_700_000_020,
+        "block timestamp last mismatch"
+    );
     Ok(())
 }
