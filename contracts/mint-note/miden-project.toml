@@ -8,6 +8,6 @@ kind = "note"
 namespace = "miden:mint-note/miden-mint-note@0.1.0"
 
 [dependencies]
-miden-core = "*"
-miden-protocol = "*"
+miden-core = "0.35"
+miden-protocol = "0.17"
 miden-xyk = { path = "../miden-xyk" }

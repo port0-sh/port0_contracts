@@ -9,7 +9,7 @@ pub mod error;
 pub mod utils;
 
 use miden::{
-    AccountId, Asset, Felt, NoteIdx, NoteType, StorageValue, Tag, Word, active_account,
+    AccountId, Asset, AssetId, Felt, NoteIdx, NoteType, StorageValue, Tag, Word, active_account,
     active_note, component, component_storage, faucet,
     native_account::{self, NativeAccount},
     note, output_note, tx,
@@ -108,7 +108,7 @@ impl MidenXykStorage {
         let note_recipient = note::build_recipient(
             serial_num,
             script_root,
-            alloc::vec![recipient.suffix, recipient.prefix],
+            alloc::vec![recipient.suffix, recipient.prefix, Felt::ZERO, Felt::ZERO],
         );
         let note_idx = output_note::create(
             Tag::from(tag),
@@ -168,8 +168,8 @@ impl MidenXyk for MidenXykStorage {
         let protocol_pot = self.protocol_pot.get();
         let token0_asset_key = self.token0_asset_key();
         let token1_asset_key = self.token1_asset_key();
-        let amount0 = active_account::get_asset(token0_asset_key)[0].as_canonical_u64();
-        let amount1 = active_account::get_asset(token1_asset_key)[0].as_canonical_u64();
+        let amount0 = active_account::get_asset(AssetId::from(token0_asset_key))[0].as_canonical_u64();
+        let amount1 = active_account::get_asset(AssetId::from(token1_asset_key))[0].as_canonical_u64();
         assert!(
             amount0 >= protocol_pot.amount0 && amount1 >= protocol_pot.amount1,
             "Protocol pot has larger amount than balances in the vault"
@@ -198,9 +198,9 @@ impl MidenXyk for MidenXykStorage {
                 asset.is_fungible(),
                 "Mint note contains non-fungible tokens"
             );
-            if asset.key.eq(&token0_asset_key) {
+            if Word::from(asset.id).eq(&token0_asset_key) {
                 amount0_in_note = asset.value[0].as_canonical_u64();
-            } else if asset.key.eq(&token1_asset_key) {
+            } else if Word::from(asset.id).eq(&token1_asset_key) {
                 amount1_in_note = asset.value[0].as_canonical_u64();
             } else {
                 panic!("Mint note has an asset that is neither token0 nor token1");
@@ -268,7 +268,7 @@ impl MidenXyk for MidenXykStorage {
             "Burn note contains a non-fungible token"
         );
         assert!(
-            asset.key.eq(&tokenlp_asset_key),
+            Word::from(asset.id).eq(&tokenlp_asset_key),
             "Burn note has an asset that is not the LP token"
         );
         let amount_in_note = asset.value[0].as_canonical_u64();
@@ -336,14 +336,14 @@ impl MidenXyk for MidenXykStorage {
         );
         let (token0_asset_key, token1_asset_key) =
             (self.token0_asset_key(), self.token1_asset_key());
-        let (token_in, token_out, reserve_in, reserve_out) = if asset.key.eq(&token0_asset_key) {
+        let (token_in, token_out, reserve_in, reserve_out) = if Word::from(asset.id).eq(&token0_asset_key) {
             (
                 token0_asset_key,
                 token1_asset_key,
                 reserves.reserve0,
                 reserves.reserve1,
             )
-        } else if asset.key.eq(&token1_asset_key) {
+        } else if Word::from(asset.id).eq(&token1_asset_key) {
             (
                 token1_asset_key,
                 token0_asset_key,

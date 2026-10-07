@@ -16,8 +16,7 @@ use miden_client::{
     },
     asset::{Asset, FungibleAsset},
     auth::AuthSchemeId,
-    crypto::RandomCoin,
-    note::{Note, NoteScript},
+    note::Note,
     transaction::RawOutputNote,
     Felt, Word,
 };
@@ -180,7 +179,7 @@ fn add_pool_account(
     seed_assets: Vec<Asset>,
 ) -> Result<AccountId> {
     let init = pool_init_storage(token0_key, token1_key, admin)?;
-    let component = AccountComponent::from_package(package.as_ref(), &init)
+    let component = AccountComponent::from_package(package.as_ref().clone(), &init)
         .context("failed to build account component from miden_xyk package")?;
 
     let account_builder = AccountBuilder::new([4_u8; 32])
@@ -201,9 +200,7 @@ fn build_note(
     storage: Vec<Felt>,
     assets: Vec<Asset>,
 ) -> Result<Note> {
-    let script = NoteScript::from_package(package.as_ref())
-        .context("failed to build note script from package")?;
-    let mut rng = RandomCoin::new(Word::from(script.root()));
+    let mut rng = rand::rng();
     NoteBuilder::new(sender, &mut rng)
         .package((*package).clone())
         .add_assets(assets)
