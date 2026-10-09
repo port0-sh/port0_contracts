@@ -7,10 +7,10 @@ use miden::*;
 pub struct NativeAccount;
 
 #[note]
-struct AdminNoteNote;
+struct AdminNote;
 
 #[note]
-impl AdminNoteNote {
+impl AdminNote {
     #[note_script]
     pub fn run(self, _arg: Word, account: &mut NativeAccount) {
         let storage = active_note::get_storage();

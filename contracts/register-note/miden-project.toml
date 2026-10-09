@@ -1,0 +1,14 @@
+[package]
+name = "register_note"
+version = "0.1.0"
+
+[lib]
+path = "src/lib.rs"
+kind = "note"
+namespace = "miden:register-note/miden-register-note@0.1.0"
+
+[dependencies]
+miden-core = "*"
+miden-protocol = "*"
+# TODO: Add your account contract dependencies here
+pool-registry = { path = "../pool-registry" }

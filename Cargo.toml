@@ -8,7 +8,7 @@ members = [
   "contracts/swap-note",
   "contracts/miden-xyk",
   "integration"
-]
+, "contracts/register-note", "contracts/pool-registry"]
 exclude = [
   "contracts/",
 ]

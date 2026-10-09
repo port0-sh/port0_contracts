@@ -1,0 +1,15 @@
+[package]
+name = "pool-registry"
+version = "0.1.0"
+
+[lib]
+path = "src/lib.rs"
+kind = "account-component"
+namespace = "miden:pool-registry/pool-registry@0.1.0"
+
+[dependencies]
+miden-core = "*"
+miden-protocol = "*"
+
+[package.metadata.miden]
+supported-types = ["RegularAccountUpdatableCode"]

@@ -7,10 +7,10 @@ use miden::*;
 pub struct NativeAccount;
 
 #[note]
-struct MintNoteNote;
+struct MintNote;
 
 #[note]
-impl MintNoteNote {
+impl MintNote {
     #[note_script]
     pub fn run(self, _arg: Word, account: &mut NativeAccount) {
         if active_note::get_sender().eq(&active_account::get_id()) {

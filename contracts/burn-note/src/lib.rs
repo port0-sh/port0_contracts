@@ -7,10 +7,10 @@ use miden::*;
 pub struct NativeAccount;
 
 #[note]
-struct BurnNoteNote;
+struct BurnNote;
 
 #[note]
-impl BurnNoteNote {
+impl BurnNote {
     #[note_script]
     pub fn run(self, _arg: Word, account: &mut NativeAccount) {
         if active_note::get_sender().eq(&active_account::get_id()) {
