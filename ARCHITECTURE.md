@@ -8,16 +8,31 @@ MidenXYK is a constant-product automated market maker. A single account holds tw
 
 ## Components
 
-Six contracts compose the system.
+Eight contracts compose the system.
 
 - `miden-xyk`: the pool account component. Holds the reserves, the LP supply, and the fee accounting.
+- `pool-registry`: the registry account component. Holds the accepted pool code commitments, the registered pools, and the ordered asset pair index.
 - `mint-note`: note script for adding liquidity.
 - `burn-note`: note script for removing liquidity.
 - `swap-note`: note script for trading.
 - `collect-note`: note script for withdrawing protocol fees.
-- `admin-note`: note script for pool configuration.
+- `register-note`: note script for registering a pool.
 
-The pool component exposes `mint`, `burn`, `swap`, `quote_swap`, `collect`, `configure`, and the state getters.
+The pool component exposes `mint`, `burn`, `swap`, `quote_swap`, `collect`, `get_registry_identity`, and the state getters. There is no `configure`: fees and the P2ID root are written at account creation and never change.
+
+## Registry
+
+The registry account holds three storage maps:
+
+| Slot | Key | Value |
+|------|-----|-------|
+| `accepted_code_commitments` | pool code commitment | `1` when accepted |
+| `pools` | pool id key `[prefix, suffix, 0, 0]` | pool code commitment |
+| `assets_to_pool` | ordered asset pair `[lo.prefix, lo.suffix, hi.prefix, hi.suffix]` | pool id key |
+
+`register` rejects equal assets, an already-registered pool id, and an already-registered asset pair. It then calls the pool's `CodeInspection::get_code_commitment` by foreign procedure invocation, requires the returned commitment in `accepted_code_commitments`, and writes both mappings. The pool installs the standard `CodeInspection` component, which carries no storage.
+
+The accepted commitment covers the pool's full component set: the `miden-xyk` component, `CodeInspection`, the network-account auth, and the fee-policy components. It therefore changes when any of those change, and the registry must be seeded with the value the deployed pool produces.
 
 ## Storage
 
@@ -25,11 +40,10 @@ The pool component declares 11 value slots.
 
 | Slot | Type | Encoding |
 |------|------|----------|
-| `tokenlp_asset_key` | Word | LP token asset key |
 | `token0_asset_key` | Word | token0 asset key |
 | `token1_asset_key` | Word | token1 asset key |
 | `lp_supply` | Felt | `[supply, 0, 0, 0]` |
-| `fees` | Word | `[lp_fee_bps, protocol_fee_bps, fee_to.prefix, fee_to.suffix]` |
+| `fees` | Word | `[lp_fee_bps, protocol_fee_share_bps, fee_to.prefix, fee_to.suffix]` |
 | `admin` | Word | `[0, 0, suffix, prefix]` of the admin account id |
 | `p2id_root` | Word | P2ID script root used for output notes |
 | `protocol_pot` | Word | `[amount0, amount1, 0, 0]` |
@@ -37,7 +51,7 @@ The pool component declares 11 value slots.
 | `price1_cumulative_last` | Word | u128, four 32-bit limbs, least significant first |
 | `block_timestamp_last` | Felt | `[timestamp, 0, 0, 0]` |
 
-`token0_asset_key`, `token1_asset_key`, and `admin` are set at account creation. `configure` sets the remaining slots.
+Every slot is written at account creation except the LP token key, which the contract derives from the pool's own account id, and the protocol pot, which accrues as swaps happen.
 
 ## Reserves
 
@@ -59,10 +73,10 @@ For a burn of `amount` LP tokens, the pool returns `amount * reserve0 / lp_suppl
 
 ## Swap
 
-The pool applies `protocol_fee_bps` to the input amount first, then applies `lp_fee_bps` to the remainder.
+The pool applies `protocol_fee_share_bps` to the input amount first, then applies `lp_fee_bps` to the remainder.
 
 ```
-lp_amount = amount_in - amount_in * protocol_fee_bps / 10000
+lp_amount = amount_in - amount_in * protocol_fee_share_bps / 10000
 amount_in_with_fee = lp_amount * (10000 - lp_fee_bps)
 amount_out = amount_in_with_fee * reserve_out / (reserve_in * 10000 + amount_in_with_fee)
 ```
@@ -75,11 +89,17 @@ The full input amount enters the vault. The output leaves the vault. The protoco
 
 ## Collect
 
-`collect` moves the protocol pot contents to `protocol_fee_to` and resets the pot. An empty pot reverts.
+`collect` moves the protocol pot contents to the protocol account the registry designates and resets the pot. An empty pot reverts.
 
-## Configure
+A swap computes `lp_fee = amount_in * lp_fee_bps / 10000` and
+`protocol_fee = lp_fee * protocol_fee_share_bps / 10000`. The pool's reserve
+grows by `amount_in - protocol_fee`, the pot by `protocol_fee`, and the output is
+computed from the full input with the LP fee weight, so the swapper's cost is the
+LP fee tier and nothing more.
 
-`configure` sets `lp_fee_bps`, `protocol_fee_bps`, `protocol_fee_to`, `p2id_root`, and `tokenlp_asset_key`. The note sender must equal the stored admin account id. The fee sum must stay below 10000.
+## Configuration
+
+A pool has no configuration procedure. `lp_fee_bps`, `protocol_fee_share_bps`, `p2id_root`, and the registry pointer are written at account creation, the fee sum is checked there, and nothing changes them afterwards. The LP token key is derived from the pool's account id. The registry's `register` procedure rejects a pool whose fee rate or token pair disagrees with the registry, and a pool whose registry pointer is not that registry.
 
 ## Oracle
 

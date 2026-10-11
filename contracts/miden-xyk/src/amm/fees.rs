@@ -1,26 +1,24 @@
-use miden::{AccountId, Felt, Word, WordValue, export_type};
+use miden::{Felt, Word, WordValue, export_type};
 
 #[export_type]
 pub struct Fees {
     pub lp_fee_bps: u32,
-    pub protocol_fee_bps: u32,
-    pub protocol_fee_to: AccountId,
+    pub protocol_fee_share_bps: u32,
 }
 
 impl WordValue for Fees {
     fn try_into_word(self) -> Result<Word, &'static str> {
         Ok(Word::from([
             Felt::from(self.lp_fee_bps),
-            Felt::from(self.protocol_fee_bps),
-            Felt::from(self.protocol_fee_to.prefix),
-            Felt::from(self.protocol_fee_to.suffix),
+            Felt::from(self.protocol_fee_share_bps),
+            Felt::ZERO,
+            Felt::ZERO,
         ]))
     }
     fn try_from_word(word: Word) -> Result<Self, &'static str> {
         Ok(Self {
             lp_fee_bps: word.a.as_canonical_u64() as u32,
-            protocol_fee_bps: word.b.as_canonical_u64() as u32,
-            protocol_fee_to: AccountId::new(word.c, word.d),
+            protocol_fee_share_bps: word.b.as_canonical_u64() as u32,
         })
     }
 }

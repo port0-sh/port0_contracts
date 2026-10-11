@@ -16,7 +16,7 @@ pub fn amount_out(
     reserve_in: u64,
     reserve_out: u64,
     lp_fee_bps: u32,
-    protocol_fee_bps: u32,
+    protocol_fee_share_bps: u32,
 ) -> Result<SwapQuote, PoolMathError> {
     if amount_in == 0 {
         return Err(PoolMathError::ZeroAmountIn);
@@ -28,12 +28,16 @@ pub fn amount_out(
         return Err(PoolMathError::Overflow);
     }
     let fee_denominator = 10000;
+    // The protocol is paid out of the LP fee, not on top of it. The swapper pays
+    // the LP fee tier and nothing more: the output below is computed from the
+    // full input and does not depend on the protocol's share. The pool keeps the
+    // fee minus that share, and the share accrues to the protocol pot.
+    let lp_fee = (lp_fee_bps as u128 * amount_in as u128 / fee_denominator as u128) as u64;
     let protocol_fee =
-        ((protocol_fee_bps) as u128 * amount_in as u128 / fee_denominator as u128) as u64;
+        (protocol_fee_share_bps as u128 * lp_fee as u128 / fee_denominator as u128) as u64;
 
-    let lp_amount = amount_in - protocol_fee;
     let weight = fee_denominator - lp_fee_bps;
-    let amount_in_with_fee = lp_amount as u128 * weight as u128;
+    let amount_in_with_fee = amount_in as u128 * weight as u128;
 
     let denominator = reserve_in as u128 * fee_denominator as u128 + amount_in_with_fee;
     let numerator = amount_in_with_fee
@@ -46,7 +50,7 @@ pub fn amount_out(
     if out >= reserve_out as u128 {
         return Err(PoolMathError::InsufficientLiquidity);
     }
-    let (reserve_in_after, has_overflown_add) = reserve_in.overflowing_add(lp_amount);
+    let (reserve_in_after, has_overflown_add) = reserve_in.overflowing_add(amount_in - protocol_fee);
     let (reserve_out_after, has_overflown_sub) = reserve_out.overflowing_sub(out as u64);
     if has_overflown_add || has_overflown_sub || reserve_in_after >= MAX_AMOUNT {
         return Err(PoolMathError::Overflow);

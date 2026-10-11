@@ -10,7 +10,7 @@ pub mod utils;
 
 use miden::{
     AccountId, Asset, AssetId, Felt, NoteIdx, NoteType, StorageValue, Tag, Word, active_account,
-    active_note, component, component_storage, faucet,
+    active_note, component, component_storage, export_type, faucet,
     native_account::{self, NativeAccount},
     note, output_note, tx,
 };
@@ -23,13 +23,25 @@ use crate::{
         reserves::Reserves,
         swap::{SwapQuote, amount_out},
     },
-    utils::{asset::compose_asset, math::add_amount, note::account_target_tag, u128::U128},
+    utils::{asset::compose_asset, note::account_target_tag, u128::U128},
 };
+
+/// The pool's identity, as the registry sees it before listing the pool.
+///
+/// Field order is the order the values occupy when the procedure returns, which
+/// is what a foreign caller reads: the registry decodes twelve felts as
+/// `[prefix, suffix, token0[0..4], token1[0..4], protocol_fee_share_bps, lp_fee_bps]`.
+#[export_type]
+pub struct PoolIdentity {
+    pub registry_id: AccountId,
+    pub token0_key: Word,
+    pub token1_key: Word,
+    pub protocol_fee_share_bps: u32,
+    pub lp_fee_bps: u32,
+}
 
 #[component_storage]
 struct MidenXykStorage {
-    #[storage(description = "LP token asset key")]
-    tokenlp_asset_key: StorageValue<Word>,
     #[storage(description = "token0 asset key")]
     token0_asset_key: StorageValue<Word>,
     #[storage(description = "token1 asset key")]
@@ -38,8 +50,6 @@ struct MidenXykStorage {
     lp_supply: StorageValue<Felt>,
     #[storage(description = "Fee beneficiary and the fee amount")]
     fees: StorageValue<Fees>,
-    #[storage(description = "AccountId that is permitted to make admin changes")]
-    admin: StorageValue<AccountId>,
     #[storage(description = "P2ID root")]
     p2id_root: StorageValue<Word>,
     #[storage(description = "Accrued protocol fees")]
@@ -50,12 +60,27 @@ struct MidenXykStorage {
     price1_cumulative_last: StorageValue<U128>,
     #[storage(description = "Last price change timestamp")]
     block_timestamp_last: StorageValue<Felt>,
+    #[storage(description = "Registry that administers this pool")]
+    registry_id: StorageValue<AccountId>,
+}
+
+/// Root of the pool-registry's `protocol_fee_to` procedure.
+///
+/// Printed by `cargo run -p integration --bin registry_roots --release`. The
+/// pool reads the protocol's fee destination from the registry over foreign
+/// procedure invocation, so the registry holds that address once for every
+/// pool instead of each pool storing its own copy.
+fn registry_protocol_fee_to_root() -> Word {
+    Word::new([
+        Felt::new_unchecked(15483598750818023257),
+        Felt::new_unchecked(336910118429041028),
+        Felt::new_unchecked(12277962169024785536),
+        Felt::new_unchecked(13342452442204916062),
+    ])
 }
 
 #[component]
 trait MidenXyk: NativeAccount {
-    #[account_procedure]
-    fn tokenlp_asset_key(&self) -> Word;
     #[account_procedure]
     fn token0_asset_key(&self) -> Word;
     #[account_procedure]
@@ -83,18 +108,32 @@ trait MidenXyk: NativeAccount {
     fn quote_swap(&self, token_in_is_0: bool, amount_in: u64) -> SwapQuote;
     #[account_procedure]
     fn collect(&mut self, serial_num: Word);
+    /// The pool's registry, token keys, and fee rates, for registration checks.
     #[account_procedure]
-    fn configure(
-        &mut self,
-        lp_fee: u64,
-        protocol_fee: u64,
-        protocol_fee_to: AccountId,
-        p2id_root: Word,
-        tokenlp_asset_key: Word,
-    );
+    fn get_registry_identity(&self) -> PoolIdentity;
 }
 
 impl MidenXykStorage {
+    /// The pool's LP asset key, derived from the pool's own account id.
+    ///
+    /// The key cannot be part of the account's initial storage: it embeds the
+    /// account id, and the account id is derived from the initial storage
+    /// commitment, so seeding it would be circular. Deriving it here removes the
+    /// configuration step that existed only to write this one word.
+    ///
+    /// The layout matches the SDK's `fungibleAssetIdWord`: `[0, 0, suffix |
+    /// 0x11, prefix]`, where `0x11` is the fungible asset id metadata byte
+    /// (composition 1, version 1).
+    fn lp_asset_key(&self) -> Word {
+        let id = active_account::get_id();
+        Word::new([
+            Felt::ZERO,
+            Felt::ZERO,
+            Felt::new_unchecked(id.suffix.as_canonical_u64() | 0x11),
+            id.prefix,
+        ])
+    }
+
     fn add_asset_to_output_note(&mut self, asset: Asset, note_idx: NoteIdx) {
         output_note::add_asset(asset, note_idx);
     }
@@ -117,6 +156,18 @@ impl MidenXykStorage {
         );
         note_idx
     }
+    /// Reads the protocol fee destination from this pool's registry.
+    ///
+    /// The registry returns the account id as `[prefix, suffix, 0, 0]`.
+    fn registry_protocol_fee_to(&self) -> AccountId {
+        let outputs = tx::execute_foreign_procedure(
+            self.registry_id.get(),
+            registry_protocol_fee_to_root(),
+            tx::ForeignProcedureInputs::new([]),
+        );
+        AccountId::new(outputs.get(0), outputs.get(1))
+    }
+
     fn update_oracle(&mut self, reserves: Reserves) {
         let now = tx::get_block_timestamp() as u64;
         let mut last = self.block_timestamp_last.get().as_canonical_u64();
@@ -149,9 +200,6 @@ impl MidenXykStorage {
 
 #[component]
 impl MidenXyk for MidenXykStorage {
-    fn tokenlp_asset_key(&self) -> Word {
-        self.tokenlp_asset_key.get()
-    }
     fn token0_asset_key(&self) -> Word {
         self.token0_asset_key.get()
     }
@@ -180,10 +228,6 @@ impl MidenXyk for MidenXykStorage {
         }
     }
     fn mint(&mut self, recipient: AccountId, serial_num: Word, tag: Felt, min_lp_out: u64) {
-        assert!(
-            self.tokenlp_asset_key.get() != Word::default(),
-            "Pool not configured yet"
-        );
         let reserves = self.get_reserves();
         self.update_oracle(reserves);
         let mut amount0_in_note = 0u64;
@@ -191,7 +235,7 @@ impl MidenXyk for MidenXykStorage {
         let (token0_asset_key, token1_asset_key, tokenlp_asset_key) = (
             self.token0_asset_key(),
             self.token1_asset_key(),
-            self.tokenlp_asset_key(),
+            self.lp_asset_key(),
         );
         for asset in active_note::get_initial_assets() {
             assert!(
@@ -250,15 +294,11 @@ impl MidenXyk for MidenXykStorage {
         min_amount0_out: u64,
         min_amount1_out: u64,
     ) {
-        assert!(
-            self.tokenlp_asset_key.get() != Word::default(),
-            "Pool not configured yet"
-        );
         self.update_oracle(self.get_reserves());
         let (token0_asset_key, token1_asset_key, tokenlp_asset_key) = (
             self.token0_asset_key(),
             self.token1_asset_key(),
-            self.tokenlp_asset_key(),
+            self.lp_asset_key(),
         );
         let assets = active_note::get_initial_assets();
         assert!(assets.len() == 1, "Burn note should contain only one asset");
@@ -315,16 +355,12 @@ impl MidenXyk for MidenXykStorage {
             reserve_in,
             reserve_out,
             fees.lp_fee_bps,
-            fees.protocol_fee_bps,
+            fees.protocol_fee_share_bps,
         )
         .unwrap();
         quote
     }
     fn swap(&mut self, recipient: AccountId, serial_num: Word, tag: Felt, min_amount_out: u64) {
-        assert!(
-            self.tokenlp_asset_key.get() != Word::default(),
-            "Pool not configured yet"
-        );
         let reserves = self.get_reserves();
         self.update_oracle(reserves);
         let assets = active_note::get_initial_assets();
@@ -365,7 +401,7 @@ impl MidenXyk for MidenXykStorage {
             reserve_in,
             reserve_out,
             fees.lp_fee_bps,
-            fees.protocol_fee_bps,
+            fees.protocol_fee_share_bps,
         )
         .unwrap();
         assert!(
@@ -386,11 +422,18 @@ impl MidenXyk for MidenXykStorage {
         protocol_pot.add_to_pot(amount0_protocol_fee, amount1_protocol_fee);
         self.protocol_pot.set(protocol_pot);
     }
+    fn get_registry_identity(&self) -> PoolIdentity {
+        let fees = self.get_fees();
+        PoolIdentity {
+            registry_id: self.registry_id.get(),
+            token0_key: self.token0_asset_key.get(),
+            token1_key: self.token1_asset_key.get(),
+            protocol_fee_share_bps: fees.protocol_fee_share_bps,
+            lp_fee_bps: fees.lp_fee_bps,
+        }
+    }
+
     fn collect(&mut self, serial_num: Word) {
-        assert!(
-            self.tokenlp_asset_key.get() != Word::default(),
-            "Pool not configured yet"
-        );
         let mut protocol_pot = self.protocol_pot.get();
         let token0_amount = protocol_pot.amount0();
         let token1_amount = protocol_pot.amount1();
@@ -400,7 +443,9 @@ impl MidenXyk for MidenXykStorage {
         );
         let (token0_asset_key, token1_asset_key) =
             (self.token0_asset_key(), self.token1_asset_key());
-        let fee_to = self.fees.get().protocol_fee_to;
+        // The destination is the registry's, not the pool's: the address can be
+        // rotated in one place, and it is read only here, on the collect path.
+        let fee_to = self.registry_protocol_fee_to();
         let note_idx = self.prepare_output_note(
             fee_to,
             serial_num,
@@ -420,50 +465,5 @@ impl MidenXyk for MidenXykStorage {
             protocol_pot.reset_amount1();
         }
         self.protocol_pot.set(protocol_pot);
-    }
-    fn configure(
-        &mut self,
-        lp_fee_bps: u64,
-        protocol_fee_bps: u64,
-        protocol_fee_to: AccountId,
-        p2id_root: Word,
-        tokenlp_asset_key: Word,
-    ) {
-        assert!(
-            active_note::get_sender().eq(&self.admin.get()),
-            "Configuration can only be with the admin account"
-        );
-        assert!(
-            tokenlp_asset_key.ne(&Word::default()),
-            "LP token asset key can't be an empty word"
-        );
-        assert!(
-            self.tokenlp_asset_key.get() == Word::default()
-                || self.tokenlp_asset_key.get() == tokenlp_asset_key,
-            "LP token asset key is already set"
-        );
-        assert!(
-            self.token0_asset_key.get().ne(&self.token1_asset_key.get()),
-            "token0 must be different than token1"
-        );
-        assert!(
-            tokenlp_asset_key.ne(&self.token0_asset_key.get()),
-            "LP token must be different than token0"
-        );
-        assert!(
-            tokenlp_asset_key.ne(&self.token1_asset_key.get()),
-            "LP token must be different than token1"
-        );
-        assert!(
-            add_amount(protocol_fee_bps, lp_fee_bps).unwrap() < 10000,
-            "Total fee bps must be less than 10000"
-        );
-        self.tokenlp_asset_key.set(tokenlp_asset_key);
-        self.fees.set(Fees {
-            lp_fee_bps: lp_fee_bps as u32,
-            protocol_fee_bps: protocol_fee_bps as u32,
-            protocol_fee_to,
-        });
-        self.p2id_root.set(p2id_root);
     }
 }

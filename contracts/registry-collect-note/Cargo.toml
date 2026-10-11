@@ -1,5 +1,5 @@
 [package]
-name = "admin_note"
+name = "registry_collect_note"
 version = "0.1.0"
 edition = "2024"
 authors = ['mic0 <mic0@mic0.dev>']
