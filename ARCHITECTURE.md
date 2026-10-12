@@ -161,8 +161,8 @@ the pool, so it is rotated in one place and read only on the collect path.
 
 A pool's configuration is its initial storage: `lp_fee_bps`,
 `protocol_fee_share_bps`, `p2id_root`, `registry_id`, and the two token asset
-keys. The LP token key is derived from the pool's account id. There is no admin
-slot and no configure procedure: an unconfigured pool does not exist.
+keys. The LP token key is derived from the pool's account id. No pool parameter
+is settable after creation.
 
 The registry is the authority on which pools are listed and on the fee policy
 they must carry. Its `register` procedure rejects a pool whose token pair, fee
