@@ -3,7 +3,7 @@
 
 use miden::*;
 
-#[account(miden_xyk::MidenXyk)]
+#[account(port0::Port0)]
 pub struct NativeAccount;
 
 #[note]

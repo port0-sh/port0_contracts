@@ -1,4 +1,4 @@
-# MidenXYK
+# port0.sh
 
 A constant-product automated market maker for the Miden rollup. A pool holds two
 fungible assets and enforces `x * y = k` between their reserves. Liquidity
@@ -10,7 +10,7 @@ the other. A protocol fee accrues to the registry's protocol account.
 
 | Contract | Kind | Purpose |
 |----------|------|---------|
-| `miden-xyk` | account component | Pool: reserves, LP supply, fee accounting, oracle |
+| `port0` | account component | Pool: reserves, LP supply, fee accounting, oracle |
 | `pool-registry` | account component | Accepted pool code commitments, pool set, asset pair index, protocol fee policy |
 | `mint-note` | note script | Add liquidity |
 | `burn-note` | note script | Remove liquidity |
@@ -153,7 +153,7 @@ therefore pays the LP fee tier and nothing more. Uniswap V2 uses a share of
 
 ```
 contracts/
-  miden-xyk/                pool account component
+  port0/                pool account component
   pool-registry/            registry account component
   mint-note/                add-liquidity note script
   burn-note/                remove-liquidity note script
@@ -169,7 +169,7 @@ integration/                MockChain integration tests and deployment binaries
 Each contract is a standalone crate built with cargo-miden:
 
 ```
-cargo miden build --manifest-path contracts/miden-xyk/Cargo.toml --release
+cargo miden build --manifest-path contracts/port0/Cargo.toml --release
 ```
 
 ## Test

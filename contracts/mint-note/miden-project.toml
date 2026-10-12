@@ -10,4 +10,4 @@ namespace = "miden:mint-note/miden-mint-note@0.1.0"
 [dependencies]
 miden-core = "0.35"
 miden-protocol = "0.17"
-miden-xyk = { path = "../miden-xyk" }
+port0 = { path = "../port0" }

@@ -341,7 +341,7 @@ Notes flow through MockChain in four steps:
 
 After `execute()` and before `add_pending_executed_transaction(...) + prove_next_block()`: if a later step will keep using the same in-memory `Account` variable, call `account.apply_patch(executed.account_patch())?` to keep the variable in sync with the chain. Post-block reads should use `mock_chain.committed_account(account.id())?`. For block advancement and reference-block semantics, see "MockChain Block Numbering" below.
 
-See [miden_xyk_test.rs](../../../integration/tests/miden_xyk_test.rs) for the current project-template note consume + prove cycle. The miden-bank [withdraw_test.rs](https://github.com/0xMiden/tutorials/blob/965739b626acf3c63a0e547d313859079ee03c18/examples/miden-bank/integration/tests/withdraw_test.rs) and [deposit_test.rs](https://github.com/0xMiden/tutorials/blob/965739b626acf3c63a0e547d313859079ee03c18/examples/miden-bank/integration/tests/deposit_test.rs) provide fuller examples of multi-note flow and note-storage layout.
+See [port0_test.rs](../../../integration/tests/port0_test.rs) for the current project-template note consume + prove cycle. The miden-bank [withdraw_test.rs](https://github.com/0xMiden/tutorials/blob/965739b626acf3c63a0e547d313859079ee03c18/examples/miden-bank/integration/tests/withdraw_test.rs) and [deposit_test.rs](https://github.com/0xMiden/tutorials/blob/965739b626acf3c63a0e547d313859079ee03c18/examples/miden-bank/integration/tests/deposit_test.rs) provide fuller examples of multi-note flow and note-storage layout.
 
 ## Multi-Transaction Test Pattern
 
@@ -375,7 +375,7 @@ transaction will be included in.
 
 ## Note Construction
 
-Prefer `NoteBuilder` for creating notes in tests. Start from `NoteBuilder::new(sender.id(), &mut note_rng)`, then configure `.package(...)`, optional `.add_assets(...)`, optional `.note_storage(...)`, and finally `.build()`. See [miden_xyk_test.rs](../../../integration/tests/miden_xyk_test.rs) and Step 6 above for the working local pattern.
+Prefer `NoteBuilder` for creating notes in tests. Start from `NoteBuilder::new(sender.id(), &mut note_rng)`, then configure `.package(...)`, optional `.add_assets(...)`, optional `.note_storage(...)`, and finally `.build()`. See [port0_test.rs](../../../integration/tests/port0_test.rs) and Step 6 above for the working local pattern.
 
 ### Building Notes from `.masp` Packages
 

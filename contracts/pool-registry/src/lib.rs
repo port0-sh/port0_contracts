@@ -39,15 +39,18 @@ fn get_code_commitment_root() -> Word {
 
 /// Root of the pool's `get_registry_identity` procedure.
 ///
-/// Printed by `cargo run -p integration --bin registry_roots --release -- miden-xyk`.
+/// Printed by `cargo run -p integration --bin registry_roots --release -- port0`.
 /// The registry reads a pool's registry pointer, token keys, and fee rates
 /// through it, because the code commitment pins code and these are storage.
+///
+/// The pool's storage interface names its slots, so this root moves with the
+/// pool's package name. Re-print it after any change to `contracts/port0`.
 fn get_registry_identity_root() -> Word {
     Word::new([
-        Felt::new_unchecked(10592370080815240896),
-        Felt::new_unchecked(9357768261560598555),
-        Felt::new_unchecked(10137583276746375694),
-        Felt::new_unchecked(9726406166751777605),
+        Felt::new_unchecked(1389409443190994318),
+        Felt::new_unchecked(4887066864456630200),
+        Felt::new_unchecked(7355368621886472789),
+        Felt::new_unchecked(9481342496745395225),
     ])
 }
 
@@ -291,7 +294,7 @@ fn compose_asset(asset_key: Word, amount: u64) -> Asset {
     )
 }
 
-/// Note tag addressed to `id`, mirroring `miden-xyk`'s `account_target_tag`.
+/// Note tag addressed to `id`, mirroring `port0`'s `account_target_tag`.
 fn account_target_tag(id: AccountId) -> Felt {
     const TAG_LEN: u32 = 14;
     let high = (id.prefix.as_canonical_u64() >> 32) as u32;

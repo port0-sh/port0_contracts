@@ -32,10 +32,10 @@ Always build contracts before running tests; tests compile contracts via `build_
 ## SDK Quick Reference
 
 See the working examples in this project:
-- `contracts/miden-xyk/src/lib.rs`: account component with typed `StorageValue` and `StorageMap` fields, output notes, and foreign procedure invocation
+- `contracts/port0/src/lib.rs`: account component with typed `StorageValue` and `StorageMap` fields, output notes, and foreign procedure invocation
 - `contracts/pool-registry/src/lib.rs`: account component with `StorageMap` and `StorageValue` fields, and FPI into a pool
 - `contracts/mint-note/src/lib.rs`: note script that calls an account procedure through the component interface
-- `integration/tests/miden_xyk_test.rs`: MockChain integration test of the pool flows
+- `integration/tests/port0_test.rs`: MockChain integration test of the pool flows
 
 Common cargo commands:
 - `cargo build -p integration --bin <name> --release`: build a specific binary from the integration crate (`code_inspection_roots`, `registry_roots`)

@@ -41,7 +41,7 @@ pub struct PoolIdentity {
 }
 
 #[component_storage]
-struct MidenXykStorage {
+struct Port0Storage {
     #[storage(description = "token0 asset key")]
     token0_asset_key: StorageValue<Word>,
     #[storage(description = "token1 asset key")]
@@ -80,7 +80,7 @@ fn registry_protocol_fee_to_root() -> Word {
 }
 
 #[component]
-trait MidenXyk: NativeAccount {
+trait Port0: NativeAccount {
     #[account_procedure]
     fn token0_asset_key(&self) -> Word;
     #[account_procedure]
@@ -113,7 +113,7 @@ trait MidenXyk: NativeAccount {
     fn get_registry_identity(&self) -> PoolIdentity;
 }
 
-impl MidenXykStorage {
+impl Port0Storage {
     /// The pool's LP asset key, derived from the pool's own account id.
     ///
     /// The key cannot be part of the account's initial storage: it embeds the
@@ -199,7 +199,7 @@ impl MidenXykStorage {
 }
 
 #[component]
-impl MidenXyk for MidenXykStorage {
+impl Port0 for Port0Storage {
     fn token0_asset_key(&self) -> Word {
         self.token0_asset_key.get()
     }

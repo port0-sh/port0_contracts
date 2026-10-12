@@ -1,11 +1,11 @@
 # Architecture
 
-This document describes the internal design of MidenXYK. `README.md` describes
+This document describes the internal design of port0.sh. `README.md` describes
 the consumer-facing note interface.
 
 ## Overview
 
-MidenXYK is a constant-product automated market maker. A single account holds
+port0.sh is a constant-product automated market maker. A single account holds
 two token reserves. Liquidity providers deposit both tokens and receive LP
 tokens. Traders exchange one token for the other. A protocol fee accrues to the
 protocol account the registry designates.
@@ -14,7 +14,7 @@ protocol account the registry designates.
 
 Eight contracts compose the system.
 
-- `miden-xyk`: the pool account component. Holds the reserves accounting, the
+- `port0`: the pool account component. Holds the reserves accounting, the
   LP supply, the fee rates, the protocol pot, and the price oracle.
 - `pool-registry`: the registry account component. Holds the accepted pool code
   commitments, the registered pools, the ordered asset pair index, and the
@@ -63,7 +63,7 @@ procedure invocation and asserts:
 
 It then writes `pools` and `assets_to_pool`. The pool installs the standard
 `CodeInspection` component, which carries no storage. The accepted commitment
-covers the pool's full component set: the `miden-xyk` component,
+covers the pool's full component set: the `port0` component,
 `CodeInspection`, the network-account auth, and the fee-policy components. It
 therefore changes when any of those change, and the registry must be seeded with
 the value the deployed pool produces.

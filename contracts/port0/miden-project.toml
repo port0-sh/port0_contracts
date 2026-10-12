@@ -1,5 +1,5 @@
 [package]
-name = "miden-xyk"
+name = "port0"
 version = "0.1.0"
 
 [package.metadata.miden]
@@ -7,7 +7,7 @@ version = "0.1.0"
 [lib]
 path = "src/lib.rs"
 kind = "account-component"
-namespace = "miden:miden-xyk/miden-xyk@0.1.0"
+namespace = "miden:port0/port0@0.1.0"
 
 [dependencies]
 miden-core = "0.35"

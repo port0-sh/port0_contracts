@@ -5,7 +5,7 @@ members = [
   "contracts/collect-note",
   "contracts/mint-note",
   "contracts/swap-note",
-  "contracts/miden-xyk",
+  "contracts/port0",
   "integration"
 , "contracts/register-note", "contracts/pool-registry"]
 exclude = [

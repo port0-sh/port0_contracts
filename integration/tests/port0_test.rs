@@ -1,4 +1,4 @@
-//! Integration tests for the UniSwap V2 constant-product AMM (`miden_xyk`) contract.
+//! Integration tests for the UniSwap V2 constant-product AMM (`port0`) contract.
 //!
 //! These tests exercise the pool end-to-end through MockChain: pool creation with
 //! the registry pointer and fee rates as initial storage, liquidity provision (mint),
@@ -27,12 +27,12 @@ use miden_standards::{
 };
 use miden_testing::{AccountState, Auth, MockChain, MockChainBuilder, MockChainNote};
 
-/// Storage slot prefix shared by every `miden_xyk` component slot.
+/// Storage slot prefix shared by every `port0` component slot.
 ///
 /// Slot names are `<package_name>::<interface_segment>::<field_name>`; the package name is
-/// `miden-xyk` (from `miden-project.toml`) and the interface segment is `miden-xyk` (from the
-/// `miden:miden-xyk/miden-xyk@0.1.0` namespace), both sanitized to `miden_xyk`.
-const SLOT_PREFIX: &str = "miden_xyk::miden_xyk";
+/// `port0` (from `miden-project.toml`) and the interface segment is `port0` (from the
+/// `miden:port0/port0@0.1.0` namespace), both sanitized to `port0`.
+const SLOT_PREFIX: &str = "port0::port0";
 
 // Fee configuration (basis points), kept well below the 10000 combined cap.
 /// LP fee tiers the registry lists, in basis points.
@@ -41,7 +41,7 @@ const LP_FEE_TIERS: [u32; 3] = [5, 30, 100];
 const LP_FEE_BPS: u32 = 30;
 const PROTOCOL_FEE_SHARE_BPS: u32 = 1200;
 
-/// Mirrors `contracts/miden-xyk/src/utils/math.rs::MAX_AMOUNT` (the u128-safe clip).
+/// Mirrors `contracts/port0/src/utils/math.rs::MAX_AMOUNT` (the u128-safe clip).
 const MAX_AMOUNT: u64 = 1 << 57;
 
 fn basic_auth() -> Auth {
@@ -119,7 +119,7 @@ fn pool_code_commitment(
         LP_FEE_BPS,
         PROTOCOL_FEE_SHARE_BPS,
     )?;
-    let component = AccountComponent::from_package(contracts.miden_xyk.as_ref().clone(), &init)
+    let component = AccountComponent::from_package(contracts.port0.as_ref().clone(), &init)
         .context("failed to build pool component for the commitment")?;
     // Built through the chain builder so it carries the mock's auth component.
     let account_builder = AccountBuilder::new([8_u8; 32])
@@ -186,7 +186,7 @@ fn account_id_felts(id: AccountId) -> [Felt; 2] {
     [id.prefix().as_felt(), id.suffix()]
 }
 
-/// Floor square root, mirroring `contracts/miden-xyk/src/utils/math.rs`.
+/// Floor square root, mirroring `contracts/port0/src/utils/math.rs`.
 fn isqrt(mut n: u128) -> u64 {
     if n == 0 {
         return 0;
@@ -205,7 +205,7 @@ fn isqrt(mut n: u128) -> u64 {
     root as u64
 }
 
-/// Swap amount-out formula, mirroring `contracts/miden-xyk/src/amm/swap.rs`.
+/// Swap amount-out formula, mirroring `contracts/port0/src/amm/swap.rs`.
 ///
 /// Returns `(amount_out, protocol_fee)`.
 fn amount_out(
@@ -230,7 +230,7 @@ fn amount_out(
 
 /// Builds every contract package once, out of process.
 struct Contracts {
-    miden_xyk: Arc<Package>,
+    port0: Arc<Package>,
     registry: Arc<Package>,
     register_note: Arc<Package>,
     registry_collect_note: Arc<Package>,
@@ -243,7 +243,7 @@ struct Contracts {
 impl Contracts {
     fn build() -> Result<Self> {
         Ok(Self {
-            miden_xyk: Arc::new(build_project_in_dir(Path::new("../contracts/miden-xyk"), true)?),
+            port0: Arc::new(build_project_in_dir(Path::new("../contracts/port0"), true)?),
             registry: Arc::new(build_project_in_dir(Path::new("../contracts/pool-registry"), true)?),
             register_note: Arc::new(build_project_in_dir(Path::new("../contracts/register-note"), true)?),
             registry_collect_note: Arc::new(build_project_in_dir(
@@ -381,7 +381,7 @@ fn add_pool_account_with_registry(
         protocol_fee_share_bps,
     )?;
     let component = AccountComponent::from_package(package.as_ref().clone(), &init)
-        .context("failed to build account component from miden_xyk package")?;
+        .context("failed to build account component from port0 package")?;
 
     let account_builder = AccountBuilder::new([4_u8; 32])
         .account_type(AccountType::Public)
@@ -524,7 +524,7 @@ async fn mint_provides_initial_liquidity() -> Result<()> {
 
     let pool = add_pool_account(
         &mut builder,
-        contracts.miden_xyk.clone(),
+        contracts.port0.clone(),
         token0_key,
         token1_key,
         admin.id(),
@@ -615,7 +615,7 @@ async fn swap_updates_reserves_and_protocol_pot() -> Result<()> {
     let reserve1 = 1_000_000_u64;
     let pool = add_pool_account(
         &mut builder,
-        contracts.miden_xyk.clone(),
+        contracts.port0.clone(),
         token0_key,
         token1_key,
         admin.id(),
@@ -683,7 +683,7 @@ async fn burn_returns_liquidity() -> Result<()> {
     let amount1 = 1_000_000_u64;
     let pool = add_pool_account(
         &mut builder,
-        contracts.miden_xyk.clone(),
+        contracts.port0.clone(),
         token0_key,
         token1_key,
         admin.id(),
@@ -791,7 +791,7 @@ async fn collect_pays_registry_designated_recipient() -> Result<()> {
     let reserve1 = 1_000_000_u64;
     let pool = add_pool_account_with_registry(
         &mut builder,
-        contracts.miden_xyk.clone(),
+        contracts.port0.clone(),
         token0_key,
         token1_key,
         admin.id(),
@@ -906,7 +906,7 @@ async fn swap_large_amount_succeeds() -> Result<()> {
 
     let pool = add_pool_account(
         &mut builder,
-        contracts.miden_xyk.clone(),
+        contracts.port0.clone(),
         token0_key,
         token1_key,
         admin.id(),
@@ -973,7 +973,7 @@ async fn swap_overflowing_reserve_reverts() -> Result<()> {
 
     let pool = add_pool_account(
         &mut builder,
-        contracts.miden_xyk.clone(),
+        contracts.port0.clone(),
         token0_key,
         token1_key,
         admin.id(),
@@ -1035,7 +1035,7 @@ async fn mint_above_max_amount_reverts() -> Result<()> {
 
     let pool = add_pool_account(
         &mut builder,
-        contracts.miden_xyk.clone(),
+        contracts.port0.clone(),
         token0_key,
         token1_key,
         admin.id(),
@@ -1089,7 +1089,7 @@ async fn burn_below_minimum_liquidity_fails() -> Result<()> {
     let amount1 = 1_000_000_u64;
     let pool = add_pool_account(
         &mut builder,
-        contracts.miden_xyk.clone(),
+        contracts.port0.clone(),
         token0_key,
         token1_key,
         admin.id(),
@@ -1177,7 +1177,7 @@ async fn second_mint_is_pro_rata_and_refunds_excess() -> Result<()> {
 
     let pool = add_pool_account(
         &mut builder,
-        contracts.miden_xyk.clone(),
+        contracts.port0.clone(),
         token0_key,
         token1_key,
         admin.id(),
@@ -1270,7 +1270,7 @@ async fn swap_token1_to_token0() -> Result<()> {
     let reserve1 = 1_000_000_u64;
     let pool = add_pool_account(
         &mut builder,
-        contracts.miden_xyk.clone(),
+        contracts.port0.clone(),
         token0_key,
         token1_key,
         admin.id(),
@@ -1338,7 +1338,7 @@ async fn swap_with_slippage_rejected() -> Result<()> {
 
     let pool = add_pool_account(
         &mut builder,
-        contracts.miden_xyk.clone(),
+        contracts.port0.clone(),
         token0_key,
         token1_key,
         admin.id(),
@@ -1395,7 +1395,7 @@ async fn swap_without_liquidity_fails() -> Result<()> {
     // Pool holds no reserves.
     let pool = add_pool_account(
         &mut builder,
-        contracts.miden_xyk.clone(),
+        contracts.port0.clone(),
         token0_key,
         token1_key,
         admin.id(),
@@ -1450,7 +1450,7 @@ async fn swap_with_protocol_fee_off() -> Result<()> {
     let reserve1 = 1_000_000_u64;
     let pool = add_pool_account_with_registry(
         &mut builder,
-        contracts.miden_xyk.clone(),
+        contracts.port0.clone(),
         token0_key,
         token1_key,
         admin.id(),
@@ -1521,7 +1521,7 @@ async fn mint_requires_both_tokens() -> Result<()> {
 
     let pool = add_pool_account(
         &mut builder,
-        contracts.miden_xyk.clone(),
+        contracts.port0.clone(),
         token0_key,
         token1_key,
         admin.id(),
@@ -1583,7 +1583,7 @@ async fn oracle_updates_price_cumulative() -> Result<()> {
 
     let pool = add_pool_account(
         &mut builder,
-        contracts.miden_xyk.clone(),
+        contracts.port0.clone(),
         token0_key,
         token1_key,
         admin.id(),
@@ -1662,7 +1662,7 @@ async fn register_lists_a_matching_pool() -> Result<()> {
     )?;
     let pool = add_pool_account_with_registry(
         &mut builder,
-        contracts.miden_xyk.clone(),
+        contracts.port0.clone(),
         token0_key,
         token1_key,
         admin.id(),
@@ -1713,7 +1713,7 @@ async fn register_rejects_a_pool_with_a_foreign_fee_rate() -> Result<()> {
     // One basis point off the registry's rate.
     let pool = add_pool_account_with_registry(
         &mut builder,
-        contracts.miden_xyk.clone(),
+        contracts.port0.clone(),
         token0_key,
         token1_key,
         admin.id(),
@@ -1769,7 +1769,7 @@ async fn register_rejects_a_second_pool_for_the_same_pair() -> Result<()> {
     // Two distinct pools, same pair.
     let first = add_pool_account_with_registry(
         &mut builder,
-        contracts.miden_xyk.clone(),
+        contracts.port0.clone(),
         token0_key,
         token1_key,
         admin.id(),
@@ -1780,7 +1780,7 @@ async fn register_rejects_a_second_pool_for_the_same_pair() -> Result<()> {
     )?;
     let second = add_pool_account_with_registry(
         &mut builder,
-        contracts.miden_xyk.clone(),
+        contracts.port0.clone(),
         token0_key,
         token1_key,
         admin.id(),

@@ -3335,14 +3335,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "miden-xyk"
-version = "0.1.0"
-dependencies = [
- "miden",
- "miden-sdk-build-script-support",
-]
-
-[[package]]
 name = "midenc-frontend-wasm-metadata"
 version = "0.15.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3933,6 +3925,14 @@ dependencies = [
 
 [[package]]
 name = "pool_registry"
+version = "0.1.0"
+dependencies = [
+ "miden",
+ "miden-sdk-build-script-support",
+]
+
+[[package]]
+name = "port0"
 version = "0.1.0"
 dependencies = [
  "miden",
