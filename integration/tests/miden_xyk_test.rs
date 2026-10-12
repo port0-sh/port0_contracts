@@ -1,8 +1,9 @@
 //! Integration tests for the UniSwap V2 constant-product AMM (`miden_xyk`) contract.
 //!
-//! These tests exercise the pool end-to-end through MockChain: configuration via the
-//! admin note, liquidity provision (mint), swaps, liquidity removal (burn), and protocol
-//! fee collection (collect). The pool account issues its own LP token, so the LP token's
+//! These tests exercise the pool end-to-end through MockChain: pool creation with
+//! the registry pointer and fee rates as initial storage, liquidity provision (mint),
+//! swaps, liquidity removal (burn), protocol fee collection (collect), and registration.
+//! The pool account issues its own LP token, so the LP token's
 //! asset key is derived from the pool account id.
 
 use std::{collections::BTreeSet, path::Path, sync::Arc};
@@ -262,7 +263,7 @@ impl Contracts {
 
 /// Builds the `InitStorageData` for a fresh pool account.
 ///
-/// `token0`/`token1` asset keys and the `admin` id are seeded at creation; the remaining slots
+/// `token0`/`token1` asset keys and the registry id are seeded at creation; the remaining slots
 /// start at their zero values; the fee configuration and P2ID root are seeded here,
 fn pool_init_storage(token0_key: Word, token1_key: Word, admin: AccountId) -> Result<InitStorageData> {
     // A pool that never collects does not need a registry; the field is a
@@ -296,9 +297,8 @@ fn pool_init_storage_with_registry(
         token1_key,
     )?;
     init.insert_value(StorageValueName::from_slot_name(&slot("lp_supply")), Felt::ZERO)?;
-    // Seeded at creation: nothing here is circular, so a pool is configured
-    // from birth and the post-creation configuration step exists only for the
-    // LP token key, which cannot be seeded.
+    // Seeded at creation: the LP token key is not stored, because the contract
+    // derives it from the pool account id.
     init.insert_value(
         StorageValueName::from_slot_name(&slot("fees")),
         Word::from([

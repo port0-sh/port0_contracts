@@ -67,7 +67,7 @@ a.as_canonical_u64() < b.as_canonical_u64()
 
 ## Workflow
 
-- Prefer existing examples in `contracts/counter-account`, `contracts/increment-note`, and `integration/tests/counter_test.rs`.
+- Prefer the existing examples in `contracts/miden-xyk`, `contracts/mint-note`, and `integration/tests/miden_xyk_test.rs`.
 - Add or update tests when changing contract behavior.
 - For complex app design, inspect the relevant Miden source repos and plan before editing.
 - Keep generated or compiled artifacts out of commits.
