@@ -18,7 +18,7 @@ Eight contracts compose the system.
 - `collect-note`: note script for withdrawing protocol fees.
 - `register-note`: note script for registering a pool.
 
-The pool component exposes `mint`, `burn`, `swap`, `quote_swap`, `collect`, `get_registry_identity`, and the state getters. There is no `configure`: fees and the P2ID root are written at account creation and never change.
+The pool component exposes `mint`, `burn`, `swap`, `quote_swap`, `collect`, `get_registry_identity`, and the state getters. A pool's fees, P2ID root, and registry pointer are part of its initial storage and hold for its lifetime.
 
 ## Registry
 
@@ -51,7 +51,7 @@ The pool component declares 11 value slots.
 | `price1_cumulative_last` | Word | u128, four 32-bit limbs, least significant first |
 | `block_timestamp_last` | Felt | `[timestamp, 0, 0, 0]` |
 
-Every slot is written at account creation except the LP token key, which the contract derives from the pool's own account id, and the protocol pot, which accrues as swaps happen.
+Every slot is written at account creation, except the LP token key, which the contract derives from the pool's account id, and the protocol pot, which accrues as swaps happen.
 
 ## Reserves
 
@@ -99,7 +99,15 @@ LP fee tier and nothing more.
 
 ## Configuration
 
-A pool has no configuration procedure. `lp_fee_bps`, `protocol_fee_share_bps`, `p2id_root`, and the registry pointer are written at account creation, the fee sum is checked there, and nothing changes them afterwards. The LP token key is derived from the pool's account id. The registry's `register` procedure rejects a pool whose fee rate or token pair disagrees with the registry, and a pool whose registry pointer is not that registry.
+A pool's configuration is its initial storage: `lp_fee_bps`,
+`protocol_fee_share_bps`, `p2id_root`, the registry pointer, and the two token
+asset keys. The fee sum is checked when the account is built, and the values hold
+for the pool's lifetime. The LP token key is derived from the pool's account id.
+
+The registry is the authority on which pools are listed and on the fee policy
+they must carry. Its `register` procedure rejects a pool whose token pair, fee
+share, or LP fee tier disagrees with the registry, and a pool whose registry
+pointer is not that registry.
 
 ## Oracle
 
