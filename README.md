@@ -153,7 +153,7 @@ therefore pays the LP fee tier and nothing more. Uniswap V2 uses a share of
 
 ```
 contracts/
-  port0/                pool account component
+  port0/                    pool account component
   pool-registry/            registry account component
   mint-note/                add-liquidity note script
   burn-note/                remove-liquidity note script
@@ -180,6 +180,15 @@ cargo test -p integration --release
 
 Tests run against MockChain, an in-process chain that compiles the contracts and
 executes the note flows without a network.
+
+## Source
+
+Radicle is the canonical source. GitHub is the mirror.
+
+| Source | Location |
+| --- | --- |
+| Radicle | https://radicle.network/nodes/iris.radicle.network/rad%3Az2byaq213P9X1TgSh9N1b4dCG73VE |
+| GitHub | https://github.com/port0-sh/port0_contracts |
 
 ## License
 
