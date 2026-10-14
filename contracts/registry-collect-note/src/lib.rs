@@ -4,14 +4,14 @@
 //!
 //! ```text
 //! [registry_prefix, registry_suffix,
-//!  asset_key_0, asset_key_1, asset_key_2, asset_key_3,
-//!  serial_0, serial_1, serial_2, serial_3]
+//!  serial_0, serial_1, serial_2, serial_3,
+//!  asset_key_0 (4 felts), asset_key_1 (4 felts), ...]
 //! ```
 //!
-//! The script asserts the executing account is the registry named in storage,
-//! then calls the registry's `collect`. Collection is permissionless, like a
-//! pool's: the destination is the registry's configured protocol account, so a
-//! caller can only flush accumulated register fees toward the protocol.
+//! The script asserts the executing account is the registry named in storage, then calls the
+//! registry's `collect` once per asset key. Collection is permissionless, like a pool's: the
+//! destination is the registry's configured protocol account, so a caller can only flush
+//! accumulated value toward it.
 
 #![no_std]
 #![feature(alloc_error_handler)]
@@ -30,7 +30,7 @@ impl RegistryCollectNote {
     pub fn run(self, _arg: Word, account: &mut NativeAccount) {
         let storage = active_note::get_storage();
         assert!(
-            storage.len() == 10,
+            storage.len() >= 6 && (storage.len() - 6) % 4 == 0,
             "Invalid number of arguments in the note"
         );
 
@@ -40,8 +40,17 @@ impl RegistryCollectNote {
             "Invalid registry account to execute against"
         );
 
-        let asset_key = Word::new([storage[2], storage[3], storage[4], storage[5]]);
-        let serial_num = Word::new([storage[6], storage[7], storage[8], storage[9]]);
-        account.collect(asset_key, serial_num)
+        let serial_num = Word::new([storage[2], storage[3], storage[4], storage[5]]);
+        let mut offset = 6;
+        while offset + 4 <= storage.len() {
+            let asset_key = Word::new([
+                storage[offset],
+                storage[offset + 1],
+                storage[offset + 2],
+                storage[offset + 3],
+            ]);
+            account.collect(asset_key, serial_num);
+            offset += 4;
+        }
     }
 }

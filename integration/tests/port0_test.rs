@@ -118,6 +118,7 @@ fn pool_code_commitment(
         admin,
         LP_FEE_BPS,
         PROTOCOL_FEE_SHARE_BPS,
+        (0, 0),
     )?;
     let component = AccountComponent::from_package(contracts.port0.as_ref().clone(), &init)
         .context("failed to build pool component for the commitment")?;
@@ -261,23 +262,6 @@ impl Contracts {
     }
 }
 
-/// Builds the `InitStorageData` for a fresh pool account.
-///
-/// `token0`/`token1` asset keys and the registry id are seeded at creation; the remaining slots
-/// start at their zero values; the fee configuration and P2ID root are seeded here,
-fn pool_init_storage(token0_key: Word, token1_key: Word, admin: AccountId) -> Result<InitStorageData> {
-    // A pool that never collects does not need a registry; the field is a
-    // placeholder so the account can be built.
-    pool_init_storage_with_registry(
-        token0_key,
-        token1_key,
-        admin,
-        admin,
-        LP_FEE_BPS,
-        PROTOCOL_FEE_SHARE_BPS,
-    )
-}
-
 /// Builds the `InitStorageData` for a pool that points at `registry_id`.
 fn pool_init_storage_with_registry(
     token0_key: Word,
@@ -286,6 +270,7 @@ fn pool_init_storage_with_registry(
     registry_id: AccountId,
     lp_fee_bps: u32,
     protocol_fee_share_bps: u32,
+    initial_reserves: (u64, u64),
 ) -> Result<InitStorageData> {
     let mut init = InitStorageData::default();
     init.insert_value(
@@ -297,6 +282,15 @@ fn pool_init_storage_with_registry(
         token1_key,
     )?;
     init.insert_value(StorageValueName::from_slot_name(&slot("lp_supply")), Felt::ZERO)?;
+    init.insert_value(
+        StorageValueName::from_slot_name(&slot("reserves")),
+        Word::from([
+            Felt::new_unchecked(initial_reserves.0),
+            Felt::new_unchecked(initial_reserves.1),
+            Felt::ZERO,
+            Felt::ZERO,
+        ]),
+    )?;
     // Seeded at creation: the LP token key is not stored, because the contract
     // derives it from the pool account id.
     init.insert_value(
@@ -372,6 +366,52 @@ fn add_pool_account_with_registry(
     protocol_fee_share_bps: u32,
     seed_assets: Vec<Asset>,
 ) -> Result<AccountId> {
+    // A pre-funded pool records the token0 and token1 seed amounts as its stored reserves.
+    let (reserve0, reserve1) = seed_reserves(token0_key, token1_key, &seed_assets);
+    add_pool_account_with_reserves(
+        builder,
+        package,
+        token0_key,
+        token1_key,
+        admin,
+        registry_id,
+        lp_fee_bps,
+        protocol_fee_share_bps,
+        (reserve0, reserve1),
+        seed_assets,
+    )
+}
+
+/// The stored reserves a pre-funded pool starts with: its token0 and token1 seed amounts.
+fn seed_reserves(token0_key: Word, token1_key: Word, seed_assets: &[Asset]) -> (u64, u64) {
+    let mut reserve0 = 0u64;
+    let mut reserve1 = 0u64;
+    for asset in seed_assets {
+        if let Some(fungible) = asset.as_fungible() {
+            if fungible.to_id_word() == token0_key {
+                reserve0 = reserve0.checked_add(fungible.amount().as_u64()).unwrap();
+            } else if fungible.to_id_word() == token1_key {
+                reserve1 = reserve1.checked_add(fungible.amount().as_u64()).unwrap();
+            }
+        }
+    }
+    (reserve0, reserve1)
+}
+
+/// Creates a pool with explicit stored reserves and extra vault credits.
+#[allow(clippy::too_many_arguments)]
+fn add_pool_account_with_reserves(
+    builder: &mut MockChainBuilder,
+    package: Arc<Package>,
+    token0_key: Word,
+    token1_key: Word,
+    admin: AccountId,
+    registry_id: AccountId,
+    lp_fee_bps: u32,
+    protocol_fee_share_bps: u32,
+    initial_reserves: (u64, u64),
+    seed_assets: Vec<Asset>,
+) -> Result<AccountId> {
     let init = pool_init_storage_with_registry(
         token0_key,
         token1_key,
@@ -379,6 +419,7 @@ fn add_pool_account_with_registry(
         registry_id,
         lp_fee_bps,
         protocol_fee_share_bps,
+        initial_reserves,
     )?;
     let component = AccountComponent::from_package(package.as_ref().clone(), &init)
         .context("failed to build account component from port0 package")?;
@@ -819,10 +860,15 @@ async fn collect_pays_registry_designated_recipient() -> Result<()> {
     )?;
 
     let serial = serial_num();
+    // Layout: pool id, serial, then one key per asset the collect sweeps.
+    let mut collect_storage = account_id_felts(pool).to_vec();
+    collect_storage.extend([serial[0], serial[1], serial[2], serial[3]]);
+    collect_storage.extend([token0_key[0], token0_key[1], token0_key[2], token0_key[3]]);
+    collect_storage.extend([token1_key[0], token1_key[1], token1_key[2], token1_key[3]]);
     let collect_note = build_note(
         contracts.collect_note.clone(),
         admin.id(),
-        vec![serial[0], serial[1], serial[2], serial[3]],
+        collect_storage,
         vec![],
     )?;
 
@@ -1841,9 +1887,10 @@ async fn registry_collect_pays_the_protocol() -> Result<()> {
     )?;
 
     let serial = serial_num();
+    // Layout: registry id, serial, then one key per asset the collect sweeps.
     let mut storage = account_id_felts(registry).to_vec();
-    storage.extend([fee_key[0], fee_key[1], fee_key[2], fee_key[3]]);
     storage.extend([serial[0], serial[1], serial[2], serial[3]]);
+    storage.extend([fee_key[0], fee_key[1], fee_key[2], fee_key[3]]);
     let collect_note = build_note(
         contracts.registry_collect_note.clone(),
         admin.id(),
@@ -1887,5 +1934,455 @@ async fn registry_collect_pays_the_protocol() -> Result<()> {
         protocol.id().prefix().as_felt(),
         "payout recipient prefix is not the protocol account"
     );
+    Ok(())
+}
+
+// ==========================================================================================
+// STORED RESERVES
+//
+// Reserves are the contract's own accounting; the vault is the custody backing it. A credit
+// the contract did not create is never a reserve, and a collect sweeps it to the protocol.
+// ==========================================================================================
+
+/// A credit the contract did not create is not a reserve.
+///
+/// The funding surplus of the deploy flow is emulated by seeding the pool vault with 21 base
+/// units of token1 before the first mint. The mint succeeds against the stored reserves, and
+/// the stray credit stays in the vault as a sweepable balance.
+#[tokio::test]
+async fn stray_credit_does_not_enter_reserves() -> Result<()> {
+    let contracts = Contracts::build()?;
+    let mut builder = MockChain::builder();
+
+    let token0_faucet =
+        builder.add_existing_basic_faucet(basic_auth(), "ALPHA", 1_000_000, Some(1_000_000))?;
+    let token1_faucet =
+        builder.add_existing_basic_faucet(basic_auth(), "BETA", 1_000_000, Some(1_000_000))?;
+    let admin = builder.add_existing_wallet(basic_auth())?;
+    let lp = builder.add_existing_wallet_with_assets(
+        basic_auth(),
+        [
+            FungibleAsset::new(token0_faucet.id(), 1_000_000)?.into(),
+            FungibleAsset::new(token1_faucet.id(), 1_000_000)?.into(),
+        ],
+    )?;
+
+    let token0_key = FungibleAsset::new(token0_faucet.id(), 1)?.to_id_word();
+    let token1_key = FungibleAsset::new(token1_faucet.id(), 1)?.to_id_word();
+
+    // The 21 base units a 133-base-unit funding note leaves after the 112-base-unit fee.
+    let pool = add_pool_account_with_reserves(
+        &mut builder,
+        contracts.port0.clone(),
+        token0_key,
+        token1_key,
+        admin.id(),
+        admin.id(),
+        LP_FEE_BPS,
+        PROTOCOL_FEE_SHARE_BPS,
+        (0, 0),
+        vec![FungibleAsset::new(token1_faucet.id(), 21)?.into()],
+    )?;
+
+    let mut mint_storage = pool_note_prefix(pool, lp.id(), serial_num(), Felt::ZERO);
+    mint_storage.push(Felt::ZERO); // min_lp_out
+    let mint_note = build_note(
+        contracts.mint_note.clone(),
+        lp.id(),
+        mint_storage,
+        vec![
+            FungibleAsset::new(token0_faucet.id(), 1_000_000)?.into(),
+            FungibleAsset::new(token1_faucet.id(), 1_000_000)?.into(),
+        ],
+    )?;
+    builder.add_output_note(RawOutputNote::Full(mint_note.clone()));
+
+    let mut mock_chain = builder.build()?;
+    consume_note(&mut mock_chain, pool, &mint_note).await?;
+
+    let reserves = read_word(&mock_chain, pool, "reserves")?;
+    assert_eq!(reserves[0].as_canonical_u64(), 1_000_000, "stored reserve0 mismatch");
+    assert_eq!(reserves[1].as_canonical_u64(), 1_000_000, "stored reserve1 mismatch");
+    assert_eq!(
+        vault_balance(&mock_chain, pool, token0_faucet.id(), 0)?,
+        1_000_000,
+        "token0 vault mismatch"
+    );
+    assert_eq!(
+        vault_balance(&mock_chain, pool, token1_faucet.id(), 0)?,
+        1_000_021,
+        "the stray credit was not retained"
+    );
+    assert_eq!(read_scalar(&mock_chain, pool, "lp_supply")?, 1_000_000, "lp supply mismatch");
+    Ok(())
+}
+
+/// A stray credit does not shift the next operation's quote.
+///
+/// With 50,000 base units of token1 credited outside an operation, the swap is still priced
+/// against the stored reserve. The vault delta shows the clean quote; the credit is only
+/// spendable through a collect.
+#[tokio::test]
+async fn stray_credit_does_not_shift_swap_output() -> Result<()> {
+    let contracts = Contracts::build()?;
+    let mut builder = MockChain::builder();
+
+    let token0_faucet =
+        builder.add_existing_basic_faucet(basic_auth(), "ALPHA", 2_000_000, Some(2_000_000))?;
+    let token1_faucet =
+        builder.add_existing_basic_faucet(basic_auth(), "BETA", 2_000_000, Some(2_000_000))?;
+    let admin = builder.add_existing_wallet(basic_auth())?;
+    let trader = builder.add_existing_wallet_with_assets(
+        basic_auth(),
+        [FungibleAsset::new(token0_faucet.id(), 10_000)?.into()],
+    )?;
+
+    let token0_key = FungibleAsset::new(token0_faucet.id(), 1)?.to_id_word();
+    let token1_key = FungibleAsset::new(token1_faucet.id(), 1)?.to_id_word();
+
+    let reserve0 = 1_000_000_u64;
+    let reserve1 = 1_000_000_u64;
+    // Large enough that a vault-derived quote would visibly shift; the stored reserves do not.
+    let stray = 50_000_u64;
+    let pool = add_pool_account_with_reserves(
+        &mut builder,
+        contracts.port0.clone(),
+        token0_key,
+        token1_key,
+        admin.id(),
+        admin.id(),
+        LP_FEE_BPS,
+        PROTOCOL_FEE_SHARE_BPS,
+        (reserve0, reserve1),
+        vec![
+            FungibleAsset::new(token0_faucet.id(), reserve0)?.into(),
+            FungibleAsset::new(token1_faucet.id(), reserve1 + stray)?.into(),
+        ],
+    )?;
+
+    let amount_in = 10_000_u64;
+    let mut swap_storage = pool_note_prefix(pool, trader.id(), serial_num(), Felt::ZERO);
+    swap_storage.push(Felt::ZERO); // min_amount_out
+    let swap_note = build_note(
+        contracts.swap_note.clone(),
+        trader.id(),
+        swap_storage,
+        vec![FungibleAsset::new(token0_faucet.id(), amount_in)?.into()],
+    )?;
+    builder.add_output_note(RawOutputNote::Full(swap_note.clone()));
+
+    let mut mock_chain = builder.build()?;
+    consume_note(&mut mock_chain, pool, &swap_note).await?;
+
+    let (clean_out, protocol_fee) =
+        amount_out(amount_in, reserve0, reserve1, LP_FEE_BPS, PROTOCOL_FEE_SHARE_BPS);
+
+    assert_eq!(
+        vault_balance(&mock_chain, pool, token1_faucet.id(), 0)?,
+        reserve1 + stray - clean_out,
+        "the swap was priced against the stray credit"
+    );
+    let reserves = read_word(&mock_chain, pool, "reserves")?;
+    assert_eq!(
+        reserves[0].as_canonical_u64(),
+        reserve0 + amount_in - protocol_fee,
+        "stored reserve0 mismatch"
+    );
+    assert_eq!(
+        reserves[1].as_canonical_u64(),
+        reserve1 - clean_out,
+        "stored reserve1 mismatch"
+    );
+    Ok(())
+}
+
+/// The oracle accrues at the stored reserves, not at a stray credit.
+#[tokio::test]
+async fn oracle_ignores_stray_credit() -> Result<()> {
+    let contracts = Contracts::build()?;
+    let mut builder = MockChain::builder();
+
+    let token0_faucet =
+        builder.add_existing_basic_faucet(basic_auth(), "ALPHA", 2_000_000, Some(2_000_000))?;
+    let token1_faucet =
+        builder.add_existing_basic_faucet(basic_auth(), "BETA", 2_000_000, Some(2_000_000))?;
+    let admin = builder.add_existing_wallet(basic_auth())?;
+    let trader = builder.add_existing_wallet_with_assets(
+        basic_auth(),
+        [FungibleAsset::new(token0_faucet.id(), 10_000)?.into()],
+    )?;
+
+    let token0_key = FungibleAsset::new(token0_faucet.id(), 1)?.to_id_word();
+    let token1_key = FungibleAsset::new(token1_faucet.id(), 1)?.to_id_word();
+
+    let reserve0 = 1_000_000_u64;
+    let reserve1 = 1_000_000_u64;
+    let stray = 21_u64;
+    let pool = add_pool_account_with_reserves(
+        &mut builder,
+        contracts.port0.clone(),
+        token0_key,
+        token1_key,
+        admin.id(),
+        admin.id(),
+        LP_FEE_BPS,
+        PROTOCOL_FEE_SHARE_BPS,
+        (reserve0, reserve1),
+        vec![
+            FungibleAsset::new(token0_faucet.id(), reserve0)?.into(),
+            FungibleAsset::new(token1_faucet.id(), reserve1 + stray)?.into(),
+        ],
+    )?;
+
+    let amount_in = 10_000_u64;
+    let mut swap_storage = pool_note_prefix(pool, trader.id(), serial_num(), Felt::ZERO);
+    swap_storage.push(Felt::ZERO);
+    let swap_note = build_note(
+        contracts.swap_note.clone(),
+        trader.id(),
+        swap_storage,
+        vec![FungibleAsset::new(token0_faucet.id(), amount_in)?.into()],
+    )?;
+    builder.add_output_note(RawOutputNote::Full(swap_note.clone()));
+
+    let mut mock_chain = builder.build()?;
+    consume_note(&mut mock_chain, pool, &swap_note).await?;
+
+    // The first block's timestamp is 1_700_000_000, and the pool's `block_timestamp_last`
+    // starts at zero, so the whole span accrues at the stored reserves.
+    let elapsed = 1_700_000_000_u128;
+    let clean_price0 = ((reserve1 as u128) << 64) / reserve0 as u128;
+    let p0 = word_to_u128(read_word(&mock_chain, pool, "price0_cumulative_last")?);
+    assert_eq!(
+        p0,
+        clean_price0 * elapsed,
+        "the oracle accrued at the stray credit"
+    );
+    Ok(())
+}
+
+/// A full LP exit leaves the locked minimum's residue, and the stored reserves track it.
+///
+/// The burn check keeps `MINIMUM_LIQUIDITY` in the pool, so the reserves after a full exit
+/// are nonzero and the pool remains usable.
+#[tokio::test]
+async fn full_exit_leaves_usable_residue() -> Result<()> {
+    let contracts = Contracts::build()?;
+    let mut builder = MockChain::builder();
+
+    let token0_faucet =
+        builder.add_existing_basic_faucet(basic_auth(), "ALPHA", 2_000_000, Some(2_000_000))?;
+    let token1_faucet =
+        builder.add_existing_basic_faucet(basic_auth(), "BETA", 2_000_000, Some(2_000_000))?;
+    let admin = builder.add_existing_wallet(basic_auth())?;
+
+    let token0_key = FungibleAsset::new(token0_faucet.id(), 1)?.to_id_word();
+    let token1_key = FungibleAsset::new(token1_faucet.id(), 1)?.to_id_word();
+
+    // Odd amounts force a nonzero rounding residue on the burn.
+    let amount0 = 1_000_000_u64;
+    let amount1 = 1_000_001_u64;
+    let pool = add_pool_account(
+        &mut builder,
+        contracts.port0.clone(),
+        token0_key,
+        token1_key,
+        admin.id(),
+        vec![],
+    )?;
+
+    let lp_supply = isqrt(amount0 as u128 * amount1 as u128);
+    let user_lp = lp_supply - 1000;
+    let lp = builder.add_existing_wallet_with_assets(
+        basic_auth(),
+        [
+            FungibleAsset::new(token0_faucet.id(), amount0)?.into(),
+            FungibleAsset::new(token1_faucet.id(), amount1)?.into(),
+            FungibleAsset::new(pool, user_lp)?.into(),
+        ],
+    )?;
+
+    let mut mint_storage = pool_note_prefix(pool, lp.id(), serial_num(), Felt::ZERO);
+    mint_storage.push(Felt::ZERO);
+    let mint_note = build_note(
+        contracts.mint_note.clone(),
+        lp.id(),
+        mint_storage,
+        vec![
+            FungibleAsset::new(token0_faucet.id(), amount0)?.into(),
+            FungibleAsset::new(token1_faucet.id(), amount1)?.into(),
+        ],
+    )?;
+
+    let burn_serial = Word::from([Felt::from(9_u8), Felt::from(8_u8), Felt::from(7_u8), Felt::from(6_u8)]);
+    let mut burn_storage = pool_note_prefix(pool, lp.id(), burn_serial, Felt::ZERO);
+    burn_storage.push(Felt::ZERO);
+    burn_storage.push(Felt::ZERO);
+    let burn_note = build_note(
+        contracts.burn_note.clone(),
+        lp.id(),
+        burn_storage,
+        vec![FungibleAsset::new(pool, user_lp)?.into()],
+    )?;
+
+    builder.add_output_note(RawOutputNote::Full(mint_note.clone()));
+    builder.add_output_note(RawOutputNote::Full(burn_note.clone()));
+
+    let mut mock_chain = builder.build()?;
+    consume_note(&mut mock_chain, pool, &mint_note).await?;
+    consume_note(&mut mock_chain, pool, &burn_note).await?;
+
+    let remaining0 = vault_balance(&mock_chain, pool, token0_faucet.id(), 0)?;
+    let remaining1 = vault_balance(&mock_chain, pool, token1_faucet.id(), 0)?;
+    assert_eq!(read_scalar(&mock_chain, pool, "lp_supply")?, 1000, "lp supply is not the locked minimum");
+    assert!(remaining0 > 0 && remaining1 > 0, "a reserve was drained to zero");
+    assert!(
+        remaining0 < amount0 && remaining1 < amount1,
+        "the exit did not pay out a proportional share"
+    );
+    let reserves = read_word(&mock_chain, pool, "reserves")?;
+    assert_eq!(reserves[0].as_canonical_u64(), remaining0, "stored reserve0 != vault");
+    assert_eq!(reserves[1].as_canonical_u64(), remaining1, "stored reserve1 != vault");
+    Ok(())
+}
+
+/// The code commitment covers code, not storage.
+///
+/// Two pools that differ only in their registry pointer (a storage value) have the same code
+/// commitment. Adding a fee-schedule entry to the network auth therefore does not move the
+/// value the registry accepts.
+#[tokio::test]
+async fn code_commitment_is_storage_independent() -> Result<()> {
+    let contracts = Contracts::build()?;
+    let mut builder = MockChain::builder();
+
+    let token0_faucet =
+        builder.add_existing_basic_faucet(basic_auth(), "ALPHA", 1_000_000, Some(1_000_000))?;
+    let token1_faucet =
+        builder.add_existing_basic_faucet(basic_auth(), "BETA", 1_000_000, Some(1_000_000))?;
+    let admin_a = builder.add_existing_wallet(basic_auth())?;
+    let admin_b = builder.add_existing_wallet(basic_auth())?;
+
+    let token0_key = FungibleAsset::new(token0_faucet.id(), 1)?.to_id_word();
+    let token1_key = FungibleAsset::new(token1_faucet.id(), 1)?.to_id_word();
+
+    let commitment_a =
+        pool_code_commitment(&mut builder, &contracts, token0_key, token1_key, admin_a.id())?;
+    let commitment_b =
+        pool_code_commitment(&mut builder, &contracts, token0_key, token1_key, admin_b.id())?;
+    assert_eq!(
+        commitment_a, commitment_b,
+        "the code commitment moved with a storage value"
+    );
+    Ok(())
+}
+
+/// Collect pays the protocol pot, any credit outside the reserves, and third assets, while
+/// never touching the recorded reserves.
+#[tokio::test]
+async fn collect_sweeps_stray_credits_and_third_assets() -> Result<()> {
+    let contracts = Contracts::build()?;
+    let mut builder = MockChain::builder();
+
+    let token0_faucet =
+        builder.add_existing_basic_faucet(basic_auth(), "ALPHA", 2_000_000, Some(2_000_000))?;
+    let token1_faucet =
+        builder.add_existing_basic_faucet(basic_auth(), "BETA", 2_000_000, Some(2_000_000))?;
+    let token2_faucet =
+        builder.add_existing_basic_faucet(basic_auth(), "GAMMA", 2_000_000, Some(2_000_000))?;
+    let admin = builder.add_existing_wallet(basic_auth())?;
+    let registry_fee_to = builder.add_existing_wallet(basic_auth())?;
+
+    let token0_key = FungibleAsset::new(token0_faucet.id(), 1)?.to_id_word();
+    let token1_key = FungibleAsset::new(token1_faucet.id(), 1)?.to_id_word();
+    let token2_key = FungibleAsset::new(token2_faucet.id(), 1)?.to_id_word();
+
+    let accepted = pool_code_commitment(&mut builder, &contracts, token0_key, token1_key, admin.id())?;
+    let registry = add_registry_account(
+        &mut builder,
+        contracts.registry.clone(),
+        registry_fee_to.id(),
+        PROTOCOL_FEE_SHARE_BPS,
+        accepted,
+    )?;
+
+    // The vault holds the reserves plus a credit in each of the three assets.
+    let reserve0 = 1_000_000_u64;
+    let reserve1 = 1_000_000_u64;
+    let stray0 = 1_234_u64;
+    let stray1 = 5_678_u64;
+    let third = 5_000_u64;
+    let pool = add_pool_account_with_reserves(
+        &mut builder,
+        contracts.port0.clone(),
+        token0_key,
+        token1_key,
+        admin.id(),
+        registry,
+        LP_FEE_BPS,
+        PROTOCOL_FEE_SHARE_BPS,
+        (reserve0, reserve1),
+        vec![
+            FungibleAsset::new(token0_faucet.id(), reserve0 + stray0)?.into(),
+            FungibleAsset::new(token1_faucet.id(), reserve1 + stray1)?.into(),
+            FungibleAsset::new(token2_faucet.id(), third)?.into(),
+        ],
+    )?;
+
+    let serial = serial_num();
+    let mut collect_storage = account_id_felts(pool).to_vec();
+    collect_storage.extend([serial[0], serial[1], serial[2], serial[3]]);
+    for key in [token0_key, token1_key, token2_key] {
+        collect_storage.extend([key[0], key[1], key[2], key[3]]);
+    }
+    let collect_note = build_note(
+        contracts.collect_note.clone(),
+        admin.id(),
+        collect_storage,
+        vec![],
+    )?;
+    builder.add_output_note(RawOutputNote::Full(collect_note.clone()));
+
+    let mut mock_chain = builder.build()?;
+    consume_note_with_foreign(&mut mock_chain, pool, &collect_note, registry).await?;
+
+    assert_eq!(
+        vault_balance(&mock_chain, pool, token0_faucet.id(), 0)?,
+        reserve0,
+        "collect touched the token0 reserve"
+    );
+    assert_eq!(
+        vault_balance(&mock_chain, pool, token1_faucet.id(), 0)?,
+        reserve1,
+        "collect touched the token1 reserve"
+    );
+    assert_eq!(
+        vault_balance(&mock_chain, pool, token2_faucet.id(), 0)?,
+        0,
+        "the third asset was not swept"
+    );
+
+    // The swept amounts left as P2ID notes to the registry's protocol account.
+    let p2id_root = Word::from(P2idNote::script_root());
+    let mut swept = Vec::new();
+    for note in mock_chain.committed_notes().values() {
+        if let MockChainNote::Public(note, _) = note {
+            if Word::from(note.recipient().script().root()) == p2id_root {
+                let inputs = note.recipient().storage().items();
+                if inputs[0] == registry_fee_to.id().suffix()
+                    && inputs[1] == registry_fee_to.id().prefix().as_felt()
+                {
+                    for asset in note.assets().iter() {
+                        if let Some(fungible) = asset.as_fungible() {
+                            swept.push((fungible.faucet_id(), fungible.amount().as_u64()));
+                        }
+                    }
+                }
+            }
+        }
+    }
+    assert!(swept.contains(&(token0_faucet.id(), stray0)), "stray token0 not swept: {swept:?}");
+    assert!(swept.contains(&(token1_faucet.id(), stray1)), "stray token1 not swept: {swept:?}");
+    assert!(swept.contains(&(token2_faucet.id(), third)), "third asset not swept: {swept:?}");
     Ok(())
 }

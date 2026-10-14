@@ -48,6 +48,8 @@ struct Port0Storage {
     token1_asset_key: StorageValue<Word>,
     #[storage(description = "Total lp supply")]
     lp_supply: StorageValue<Felt>,
+    #[storage(description = "Pool reserves, the accounting the vault must cover")]
+    reserves: StorageValue<Reserves>,
     #[storage(description = "Fee beneficiary and the fee amount")]
     fees: StorageValue<Fees>,
     #[storage(description = "P2ID root")]
@@ -70,6 +72,16 @@ struct Port0Storage {
 /// pool reads the protocol's fee destination from the registry over foreign
 /// procedure invocation, so the registry holds that address once for every
 /// pool instead of each pool storing its own copy.
+/// Cycles added to the transaction's current cycle count when a collect procedure reserves the
+/// fee it will owe at the epilogue.
+///
+/// `tx::compute_fee` is the kernel's own fee procedure, the same formula the epilogue charges; the
+/// only input is the work still ahead. `MAX_CYCLES` is `2^29`, so `2^28` leaves any collect
+/// transaction (well below `2^28` cycles) with a reserve of `base_fee * 29`, which is at least the
+/// fee of any transaction under `2^28` cycles. Over-reserving is safe: the surplus stays in the
+/// vault and the next collect sweeps it.
+const COLLECT_EXTRA_CYCLES: u32 = 1 << 28;
+
 fn registry_protocol_fee_to_root() -> Word {
     Word::new([
         Felt::new_unchecked(15483598750818023257),
@@ -107,7 +119,7 @@ trait Port0: NativeAccount {
     #[account_procedure]
     fn quote_swap(&self, token_in_is_0: bool, amount_in: u64) -> SwapQuote;
     #[account_procedure]
-    fn collect(&mut self, serial_num: Word);
+    fn collect(&mut self, asset_key: Word, serial_num: Word);
     /// The pool's registry, token keys, and fee rates, for registration checks.
     #[account_procedure]
     fn get_registry_identity(&self) -> PoolIdentity;
@@ -213,19 +225,22 @@ impl Port0 for Port0Storage {
         self.fees.get()
     }
     fn get_reserves(&self) -> Reserves {
+        // Reserves are stored accounting, not a vault balance: a credit the contract did not
+        // create (a stray P2ID, a funding surplus, a fee sponsorship) must not enter a quote.
+        // The vault is the custody backing the accounting, so it is asserted to cover the
+        // reserves plus the protocol pot on every read.
+        let reserves = self.reserves.get();
         let protocol_pot = self.protocol_pot.get();
         let token0_asset_key = self.token0_asset_key();
         let token1_asset_key = self.token1_asset_key();
         let amount0 = active_account::get_asset(AssetId::from(token0_asset_key))[0].as_canonical_u64();
         let amount1 = active_account::get_asset(AssetId::from(token1_asset_key))[0].as_canonical_u64();
         assert!(
-            amount0 >= protocol_pot.amount0 && amount1 >= protocol_pot.amount1,
-            "Protocol pot has larger amount than balances in the vault"
+            amount0 >= reserves.reserve0 + protocol_pot.amount0
+                && amount1 >= reserves.reserve1 + protocol_pot.amount1,
+            "Vault does not cover the recorded reserves and protocol pot"
         );
-        Reserves {
-            reserve0: amount0 - protocol_pot.amount0,
-            reserve1: amount1 - protocol_pot.amount1,
-        }
+        reserves
     }
     fn mint(&mut self, recipient: AccountId, serial_num: Word, tag: Felt, min_lp_out: u64) {
         let reserves = self.get_reserves();
@@ -255,8 +270,8 @@ impl Port0 for Port0Storage {
         let MintQuote {
             liquidity_to_user,
             lp_supply_after,
-            reserve0_after: _,
-            reserve1_after: _,
+            reserve0_after,
+            reserve1_after,
             refund0,
             refund1,
         } = quote_mint(
@@ -285,6 +300,10 @@ impl Port0 for Port0Storage {
             native_account::remove_asset(asset);
         }
         self.lp_supply.set(Felt::new_unchecked(lp_supply_after));
+        self.reserves.set(Reserves {
+            reserve0: reserve0_after,
+            reserve1: reserve1_after,
+        });
     }
     fn burn(
         &mut self,
@@ -316,8 +335,8 @@ impl Port0 for Port0Storage {
             amount0,
             amount1,
             lp_supply_after,
-            reserve0_after: _,
-            reserve1_after: _,
+            reserve0_after,
+            reserve1_after,
         } = quote_burn(
             amount_in_note,
             self.get_reserves(),
@@ -341,6 +360,10 @@ impl Port0 for Port0Storage {
         native_account::remove_asset(asset1);
         faucet::burn(asset);
         self.lp_supply.set(Felt::new_unchecked(lp_supply_after));
+        self.reserves.set(Reserves {
+            reserve0: reserve0_after,
+            reserve1: reserve1_after,
+        });
     }
     fn quote_swap(&self, token_in_is_0: bool, amount_in: u64) -> SwapQuote {
         let Reserves { reserve0, reserve1 } = self.get_reserves();
@@ -393,8 +416,8 @@ impl Port0 for Port0Storage {
         let fees = self.fees.get();
         let SwapQuote {
             amount_out,
-            reserve_in_after: _,
-            reserve_out_after: _,
+            reserve_in_after,
+            reserve_out_after,
             protocol_fee,
         } = amount_out(
             amount_in,
@@ -421,6 +444,15 @@ impl Port0 for Port0Storage {
         let mut protocol_pot = self.protocol_pot.get();
         protocol_pot.add_to_pot(amount0_protocol_fee, amount1_protocol_fee);
         self.protocol_pot.set(protocol_pot);
+        let (reserve0_after, reserve1_after) = if token_in.eq(&token0_asset_key) {
+            (reserve_in_after, reserve_out_after)
+        } else {
+            (reserve_out_after, reserve_in_after)
+        };
+        self.reserves.set(Reserves {
+            reserve0: reserve0_after,
+            reserve1: reserve1_after,
+        });
     }
     fn get_registry_identity(&self) -> PoolIdentity {
         let fees = self.get_fees();
@@ -433,16 +465,47 @@ impl Port0 for Port0Storage {
         }
     }
 
-    fn collect(&mut self, serial_num: Word) {
-        let mut protocol_pot = self.protocol_pot.get();
-        let token0_amount = protocol_pot.amount0();
-        let token1_amount = protocol_pot.amount1();
-        assert!(
-            token0_amount > 0 || token1_amount > 0,
-            "Protocol pot is empty"
-        );
+    /// Pays out everything the vault holds above the recorded reserves for one asset key.
+    ///
+    /// For token0 and token1 that amount is the protocol pot plus any credit outside the
+    /// reserves; the pot is reset because it was paid. For any other key it is the whole
+    /// balance. The call is permissionless: the destination is the registry's protocol account,
+    /// so a caller can only flush value toward it.
+    ///
+    /// When the key is the chain fee asset, the transaction's own fee is left in the vault. The
+    /// fee is paid at the epilogue, after note execution, and the sponsorship note bound to this
+    /// collect can be consumed before or after it, so the fee must not depend on that order.
+    fn collect(&mut self, asset_key: Word, serial_num: Word) {
         let (token0_asset_key, token1_asset_key) =
             (self.token0_asset_key(), self.token1_asset_key());
+        let is_fee_asset = asset_key.eq(&Word::from(tx::get_fee_asset_id()));
+        let fee_hold = if is_fee_asset {
+            tx::compute_fee(COLLECT_EXTRA_CYCLES, Word::default()).as_u64()
+        } else {
+            0
+        };
+        let balance = active_account::get_asset(AssetId::from(asset_key))[0].as_canonical_u64();
+        let reserves = self.reserves.get();
+        let reserved = if asset_key.eq(&token0_asset_key) {
+            reserves.reserve0
+        } else if asset_key.eq(&token1_asset_key) {
+            reserves.reserve1
+        } else {
+            0
+        };
+        let payout = balance.saturating_sub(reserved).saturating_sub(fee_hold);
+        if payout == 0 {
+            return;
+        }
+        if asset_key.eq(&token0_asset_key) || asset_key.eq(&token1_asset_key) {
+            let mut protocol_pot = self.protocol_pot.get();
+            if asset_key.eq(&token0_asset_key) {
+                protocol_pot.reset_amount0();
+            } else {
+                protocol_pot.reset_amount1();
+            }
+            self.protocol_pot.set(protocol_pot);
+        }
         // The destination is the registry's, not the pool's: the address can be
         // rotated in one place, and it is read only here, on the collect path.
         let fee_to = self.registry_protocol_fee_to();
@@ -452,18 +515,8 @@ impl Port0 for Port0Storage {
             account_target_tag(fee_to),
             self.p2id_root.get(),
         );
-        if token0_amount > 0 {
-            let asset = compose_asset(token0_asset_key, token0_amount).unwrap();
-            native_account::remove_asset(asset);
-            self.add_asset_to_output_note(asset, note_idx);
-            protocol_pot.reset_amount0();
-        }
-        if token1_amount > 0 {
-            let asset = compose_asset(token1_asset_key, token1_amount).unwrap();
-            native_account::remove_asset(asset);
-            self.add_asset_to_output_note(asset, note_idx);
-            protocol_pot.reset_amount1();
-        }
-        self.protocol_pot.set(protocol_pot);
+        let asset = compose_asset(asset_key, payout).unwrap();
+        native_account::remove_asset(asset);
+        self.add_asset_to_output_note(asset, note_idx);
     }
 }

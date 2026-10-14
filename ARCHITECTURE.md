@@ -76,13 +76,14 @@ permissionless and reverts when the registry holds none of the asset or when
 
 ## Storage
 
-The pool component declares ten value slots.
+The pool component declares eleven value slots.
 
 | Slot | Type | Encoding |
 |------|------|----------|
 | `token0_asset_key` | Word | token0 asset key |
 | `token1_asset_key` | Word | token1 asset key |
 | `lp_supply` | Felt | `[supply, 0, 0, 0]` |
+| `reserves` | Word | `[reserve0, reserve1, 0, 0]` |
 | `fees` | Word | `[lp_fee_bps, protocol_fee_share_bps, 0, 0]` |
 | `p2id_root` | Word | P2ID script root used for output notes |
 | `protocol_pot` | Word | `[amount0, amount1, 0, 0]` |
@@ -91,17 +92,21 @@ The pool component declares ten value slots.
 | `block_timestamp_last` | Felt | `[timestamp, 0, 0, 0]` |
 | `registry_id` | Word | `[0, 0, suffix, prefix]` of the registry account id |
 
-Every slot except `protocol_pot` and the oracle accumulators is written at
-account creation. The LP token key is not a slot: the contract derives it from
-the pool's account id as `[0, 0, suffix | 0x11, prefix]`, because the key embeds
-the account id and the account id is derived from the initial storage
-commitment, so seeding it would be circular. `protocol_pot` accrues as swaps
+Every slot except `reserves`, `protocol_pot`, and the oracle accumulators is
+written at account creation. The LP token key is not a slot: the contract
+derives it from the pool's account id as `[0, 0, suffix | 0x11, prefix]`, because
+the key embeds the account id and the account id is derived from the initial
+storage commitment, so seeding it would be circular. `reserves` starts at zero
+and is written by `mint`, `burn`, and `swap`; `protocol_pot` accrues as swaps
 happen.
 
 ## Reserves
 
-The pool does not store reserves. Reserves equal the vault balances of token0
-and token1 minus the protocol pot.
+Reserves are stored accounting: the `reserves` word is authoritative, and the
+vault is the custody backing it. `get_reserves` returns the stored word and
+asserts the vault covers `reserves + protocol_pot` for both tokens on every
+read. A credit the contract did not create (a funding surplus, a stray P2ID, a
+sponsorship remainder) is never a reserve and never enters a quote.
 
 ## Execution model
 
@@ -152,10 +157,20 @@ amount out, the resulting reserves, and the protocol fee.
 
 ## Collect
 
-`collect` reads the protocol fee destination from the registry by foreign
-procedure invocation, moves the protocol pot contents to that account as a P2ID
-note, and resets the pot. An empty pot reverts. The destination is not stored in
-the pool, so it is rotated in one place and read only on the collect path.
+`collect(asset_key, serial_num)` pays everything the vault holds above the
+recorded reserves for one asset key to the registry's protocol account, as a
+P2ID note. For token0 and token1 that is the protocol pot plus any credit
+outside the reserves, and the pot is reset because it was paid. For any other
+key it is the whole balance, so a third asset sent to the pool is recoverable.
+The call is permissionless and the destination is not stored in the pool: it is
+read from the registry over foreign procedure invocation on the collect path, so
+it is rotated in one place.
+
+When the key is the chain fee asset, the transaction's own fee is left in the
+vault (`tx::compute_fee`). The fee is paid at the epilogue, and the sponsorship
+note bound to the collect may be consumed before or after the collect, so the
+payout must not depend on that order. A collect note carries `[pool_id, serial,
+key...]` and calls `collect` once per key.
 
 ## Configuration
 
@@ -232,21 +247,23 @@ Swap:
 
 Collect:
 
-- protocol pot empty
+- no key produced a payout (the call is a no-op per key; a collect that pays
+  nothing in any key leaves the transaction with no effect, which the network
+  auth rejects)
 
 Registry `collect`:
 
 - `p2id_root` unset
 - asset key empty
-- registry holds none of the asset
+- no key produced a payout (see above)
 
 ## Indexing
 
 An indexer reads the registry's `pools` map to obtain the pool set. It then
 reads each public pool's account storage, vault, and network-account fee slots
 to obtain reserves, `lp_supply`, fees, the oracle accumulators, the fee asset,
-and the per-note fee schedule. Reserves equal the vault balances of token0 and
-token1 minus the protocol pot.
+and the per-note fee schedule. Reserves are the pool's stored `reserves` word;
+the vault is checked to cover the reserves plus the protocol pot.
 
 The node returns at most 1000 entries per storage map in one account read. A
 `pools` map above that limit must be paged with `SyncAccountStorageMaps` or

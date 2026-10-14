@@ -22,6 +22,16 @@ extern crate alloc;
 
 use miden::*;
 
+/// Cycles added to the transaction's current cycle count when `collect` reserves the fee it will
+/// owe at the epilogue.
+///
+/// The fee is paid after note execution, and the sponsorship note bound to the collect can be
+/// consumed before or after it, so the registry leaves the fee in its vault instead of relying on
+/// the order. `tx::compute_fee` is the kernel's own fee procedure; `MAX_CYCLES` is `2^29`, so
+/// `2^28` reserves `base_fee * 29`, at least the fee of any collect transaction under `2^28`
+/// cycles. The surplus stays in the vault and the next collect sweeps it.
+const COLLECT_EXTRA_CYCLES: u32 = 1 << 28;
+
 /// Root of the `get_code_commitment` procedure of the `CodeInspection` account
 /// component (`miden-standards` 0.17.1).
 ///
@@ -47,10 +57,10 @@ fn get_code_commitment_root() -> Word {
 /// pool's package name. Re-print it after any change to `contracts/port0`.
 fn get_registry_identity_root() -> Word {
     Word::new([
-        Felt::new_unchecked(1389409443190994318),
-        Felt::new_unchecked(4887066864456630200),
-        Felt::new_unchecked(7355368621886472789),
-        Felt::new_unchecked(9481342496745395225),
+        Felt::new_unchecked(17095815649865696458),
+        Felt::new_unchecked(8916881706855760124),
+        Felt::new_unchecked(5432166796969912291),
+        Felt::new_unchecked(12836174368290222817),
     ])
 }
 
@@ -222,8 +232,19 @@ impl PoolRegistry for PoolRegistryStorage {
         );
         assert!(asset_key != zero_word(), "Asset key must not be empty");
 
-        let amount = active_account::get_asset(AssetId::from(asset_key))[0].as_canonical_u64();
-        assert!(amount > 0, "Registry holds none of that asset");
+        // Leave the transaction's own fee behind when the swept key is the fee asset. The fee is
+        // paid at the epilogue; without this, a sweep of the whole balance would leave nothing to
+        // pay it with, which is what the unsponsored registry collect hit.
+        let fee_hold = if asset_key.eq(&Word::from(tx::get_fee_asset_id())) {
+            tx::compute_fee(COLLECT_EXTRA_CYCLES, Word::default()).as_u64()
+        } else {
+            0
+        };
+        let balance = active_account::get_asset(AssetId::from(asset_key))[0].as_canonical_u64();
+        let amount = balance.saturating_sub(fee_hold);
+        if amount == 0 {
+            return;
+        }
 
         let fee_to = self.protocol_fee_to.get();
         let recipient = note::build_recipient(
