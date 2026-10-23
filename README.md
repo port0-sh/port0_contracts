@@ -11,20 +11,21 @@ the other. A protocol fee accrues to the registry's protocol account.
 | Contract | Kind | Purpose |
 |----------|------|---------|
 | `port0` | account component | Pool: reserves, LP supply, fee accounting, oracle |
-| `pool-registry` | account component | Accepted pool code commitments, pool set, asset pair index, protocol fee policy |
-
-A deployed pool account carries the `port0` component, the standard basic
-fungible faucet component (the LP token's name, symbol, and decimals, so wallets
-can render it), the standard `CodeInspection` component (the registry reads
-`get_code_commitment` over FPI at registration), and the network auth component
-(note-script allowlist and fee schedule). The SDK installs all four; see
-`port0_sdk/src/pool/lpFaucet.ts` for the LP metadata.
+| `pool-registry` | account component | Accepted pool code commitments, pool set, asset pair index, protocol fee policy, admin register fee |
 | `mint-note` | note script | Add liquidity |
 | `burn-note` | note script | Remove liquidity |
 | `swap-note` | note script | Trade |
 | `collect-note` | note script | Move a pool's accrued protocol fees to the protocol account |
 | `register-note` | note script | Register a pool in the registry |
 | `registry-collect-note` | note script | Move the registry's whole balance to the protocol account |
+| `registry-config-note` | note script | Change the registry's register fee, admin only |
+
+A deployed pool account carries four components: `port0`, the standard basic
+fungible faucet component (the LP token's name, symbol, and decimals, so wallets
+can render it), the standard `CodeInspection` component (the registry reads
+`get_code_commitment` over FPI at registration), and the network auth component
+(note-script allowlist, fee schedule, and the `get_auth_identity` and
+`get_fee_identity` roots the registry pins). The SDK installs all four.
 
 A pool is a public network account. An operation is a network note sent to the
 pool; the node's transaction builder consumes it and runs the pool procedure.
@@ -35,10 +36,13 @@ Registration is a network note sent to the registry.
 - Pool: a single account that holds token0 and token1. Its fee rates, P2ID
   root, and registry pointer are initial storage and hold for its lifetime.
 - Registry: a public network account that holds the accepted pool code
-  commitments, the registered pools, the ordered asset pair index, and the
-  protocol fee policy.
+  commitments, the registered pools, the ordered asset pair index, the protocol
+  fee policy, and the expected pool storage roots. It has one admin, whose only
+  power is to change the register fee.
 - LP token: a native fungible asset issued by the pool account. The asset key
-  is derived from the pool's account id at run time, not stored. An amount `a`
+  is derived from the pool's account id at run time, not stored. The account
+  carries the standard fungible faucet component, so the token has a name, a
+  symbol, and decimals. An amount `a`
   of LP tokens entitles the holder to the fraction `a / lp_supply` of the
   reserves.
 - Roles:
@@ -47,6 +51,8 @@ Registration is a network note sent to the registry.
   - Trader emits swap notes.
   - Fee recipient emits collect notes against a pool, or registry-collect notes
     against the registry. Both are permissionless.
+  - Registry admin emits the registry-config note, which changes the register
+    fee and nothing else.
 
 ## Usage
 
@@ -77,10 +83,11 @@ note storage.
 | collect-note | none | pool id (2), serial (4), then one asset key (4) per swept asset |
 | register-note | none | registry id (2), pool id (2), asset0 (2), asset1 (2) |
 | registry-collect-note | none | registry id (2), serial (4), then one asset key (4) per swept asset |
+| registry-config-note | none | registry id (2), new register fee (1), register note script root (4) |
 
 Account ids are two felts, prefix then suffix. `deadline` is a block timestamp;
 the note reverts if the pool executes it after that time. The `min_*` fields
-bound slippage.
+bound slippage. A collect note carries at most four asset keys.
 
 ### mint-note
 
@@ -109,7 +116,8 @@ token1 that is the protocol pot plus any credit outside the reserves, and the
 pot is reset; for any other key it is the whole balance, so a third asset sent
 to the pool is recoverable. Permissionless: the destination is fixed in the
 registry, so a caller can only flush value toward it. When the key is the chain
-fee asset, the transaction's own fee is left in the vault for the epilogue.
+fee asset, the transaction's own fee reserve stays in the vault unless the
+transaction carries a sponsorship note.
 
 ### register-note
 
@@ -159,6 +167,8 @@ therefore pays the LP fee tier and nothing more. Uniswap V2 uses a share of
 - Amounts, reserves, and LP supply are u64 values capped at
   `MAX_AMOUNT = 2^57`. The cap keeps every u128 intermediate, including the
   swap numerator, below `u128::MAX`.
+- A collect note carries at most four asset keys. The collect scripts reject a
+  longer list, so the fee schedule price covers the largest accepted sweep.
 - The price oracle (cumulative prices and the last block timestamp) updates on
   mint, burn, and swap, and saturates the accumulators at `u128::MAX`.
 
@@ -174,6 +184,7 @@ contracts/
   collect-note/             pool protocol-fee collection note script
   register-note/            pool registration note script
   registry-collect-note/    registry fee collection note script
+  registry-config-note/     register fee configuration note script
 integration/                MockChain integration tests and deployment binaries
 ```
 

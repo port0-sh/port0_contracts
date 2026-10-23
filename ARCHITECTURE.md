@@ -12,13 +12,13 @@ protocol account the registry designates.
 
 ## Components
 
-Eight contracts compose the system.
+Nine contracts compose the system.
 
 - `port0`: the pool account component. Holds the reserves accounting, the
   LP supply, the fee rates, the protocol pot, and the price oracle.
 - `pool-registry`: the registry account component. Holds the accepted pool code
-  commitments, the registered pools, the ordered asset pair index, and the
-  protocol fee policy.
+  commitments, the registered pools, the ordered asset pair index, the protocol
+  fee policy, and the pool storage roots it pins at registration.
 - `mint-note`: note script for adding liquidity.
 - `burn-note`: note script for removing liquidity.
 - `swap-note`: note script for trading.
@@ -26,18 +26,22 @@ Eight contracts compose the system.
 - `register-note`: note script for registering a pool.
 - `registry-collect-note`: note script for withdrawing the registry's register
   fees.
+- `registry-config-note`: note script for changing the register fee, admin only.
 
 The pool component exposes `token0_asset_key`, `token1_asset_key`, `lp_supply`,
-`get_reserves`, `get_fees`, `mint`, `burn`, `swap`, `quote_swap`, `collect`, and
-`get_registry_identity` as account procedures. A pool's fee rates, P2ID root,
-registry pointer, and token keys are part of its initial storage and hold for
-its lifetime. `get_registry_identity` returns the registry pointer, the two
-token keys, and the two fee rates as twelve felts, and is the procedure the
+`get_reserves`, `get_fees`, `mint`, `burn`, `swap`, `quote_swap`, `collect`,
+`get_registry_identity`, `get_auth_identity`, and `get_fee_identity` as account
+procedures. A pool's fee rates, P2ID root, registry pointer, and token keys are
+part of its initial storage and hold for its lifetime.
+`get_registry_identity` returns the registry pointer, the two token keys, the two
+fee rates, and the payout root as sixteen felts, and is the procedure the
 registry calls over foreign procedure invocation at registration.
+`get_auth_identity` and `get_fee_identity` return the six storage roots the
+registry pins.
 
 ## Registry
 
-The registry account declares seven storage slots.
+The registry account declares fifteen storage slots.
 
 | Slot | Type | Key | Value |
 |------|------|-----|-------|
@@ -47,19 +51,48 @@ The registry account declares seven storage slots.
 | `protocol_fee_to` | value | account id word `[0, 0, suffix, prefix]` | protocol fee destination |
 | `protocol_fee_share_bps` | value | `[bps, 0, 0, 0]` | protocol fee rate a pool must carry |
 | `allowed_lp_fee_bps` | map | LP fee tier in bps | `1` when a pool may charge it |
-| `p2id_root` | value | P2ID script root | script root of the payout note |
+| `p2id_root` | value | P2ID script root | script root of the payout note, and the root every pool must carry |
+| `expected_note_allowlist_root` | value | root | note allowlist root every pool must carry |
+| `expected_tx_script_allowlist_root` | value | root | transaction-script allowlist root every pool must carry |
+| `expected_fee_schedule_root` | value | root | fee schedule root every pool must carry |
+| `expected_fee_asset_id` | value | asset id word | fee asset every pool must charge in |
+| `expected_active_fee_policy_root` | value | root | active fee policy root every pool must carry |
+| `expected_allowed_fee_policy_roots` | value | root | allowed fee policy roots every pool must carry |
+| `admin` | value | account id word `[0, 0, suffix, prefix]` | account allowed to change the register fee |
+| `register_note_root` | value | script root | the only script root whose fee the admin may change |
 
 `register` rejects equal assets, an already-registered pool id, and an
 already-registered asset pair. It then calls the pool's
-`CodeInspection::get_code_commitment` and `get_registry_identity` by foreign
-procedure invocation and asserts:
+`CodeInspection::get_code_commitment`, `get_registry_identity`,
+`get_auth_identity`, and `get_fee_identity` by foreign procedure invocation and
+asserts:
 
 - the returned commitment is in `accepted_code_commitments`;
 - the pool's registry pointer equals the executing registry;
 - the pool's token keys match the claimed pair in either order;
 - the pool's protocol fee rate equals the registry's
   `protocol_fee_share_bps`;
-- the pool's LP fee is an entry in `allowed_lp_fee_bps`.
+- the pool's LP fee is an entry in `allowed_lp_fee_bps`;
+- the pool's payout root equals the registry's `p2id_root`;
+- the pool's note allowlist, transaction-script allowlist, and fee schedule
+  roots equal the values the registry was created with;
+- the pool's fee asset, active fee policy root, and allowed fee policy roots
+  equal the values the registry was created with.
+
+The storage checks exist because a code commitment pins code and not storage: a
+pool could carry the accepted component set with an allowlist of its own, and an
+admitted note could move the pool's assets out through the wallet's
+`move_asset_to_note`.
+
+## Register fee
+
+The registry has one admin, fixed at creation, with one power.
+`set_register_fee(new_fee, note_root)` rewrites the register note's entry in the
+registry's own fee schedule. It requires the note sender to be the admin, the
+new fee to be positive, and the script root to already carry a scheduled entry,
+so only the register note can be repriced. The call is a `registry-config` note.
+Registration is permissionless, so the fee is the only lever against a flood of
+pools.
 
 It then writes `pools` and `assets_to_pool`. The pool installs the standard
 `CodeInspection` component, which carries no storage. The accepted commitment
@@ -166,11 +199,15 @@ The call is permissionless and the destination is not stored in the pool: it is
 read from the registry over foreign procedure invocation on the collect path, so
 it is rotated in one place.
 
-When the key is the chain fee asset, the transaction's own fee is left in the
-vault (`tx::compute_fee`). The fee is paid at the epilogue, and the sponsorship
-note bound to the collect may be consumed before or after the collect, so the
-payout must not depend on that order. A collect note carries `[pool_id, serial,
-key...]` and calls `collect` once per key.
+When the key is the chain fee asset, `collect` leaves a measured reserve in the
+vault for the transaction's own epilogue charge. The reserve is
+`POOL_COLLECT_FEE_HOLD` (126 base units) and `REGISTRY_COLLECT_FEE_HOLD` (119)
+for the registry, measured on the four-key path and stored in
+`contracts/collect-fee-hold.rs`, which both contracts include. The reserve
+applies only when the transaction carries no FEE_SPONSORSHIP note: a sponsored
+collect reserves nothing and sweeps the whole balance. A collect note carries
+`[pool_id, serial, key...]`, calls `collect` once per key, and carries at most
+four keys.
 
 ## Configuration
 
@@ -220,7 +257,7 @@ Each procedure reverts under these conditions.
 Mint:
 
 - deposit missing one token
-- deposited amount above `MAX_AMOUNT`
+- deposit plus reserve above `MAX_AMOUNT`
 - first deposit mints at most `MINIMUM_LIQUIDITY`
 - later deposit mints zero liquidity
 - liquidity out below `min_lp_out`
@@ -230,7 +267,7 @@ Burn:
 - note carries multiple assets or a non-LP asset
 - LP amount zero
 - pool empty
-- amount above `MAX_AMOUNT`
+- amount, reserve, or LP supply above `MAX_AMOUNT`
 - burn leaves less than `MINIMUM_LIQUIDITY`
 - either payout rounds to zero
 - payout below its minimum
@@ -247,15 +284,23 @@ Swap:
 
 Collect:
 
-- no key produced a payout (the call is a no-op per key; a collect that pays
-  nothing in any key leaves the transaction with no effect, which the network
-  auth rejects)
+- a key that pays nothing is a no-op, and a sweep in which every key pays
+  nothing moves no value. The consumed note and the paid fee are the
+  transaction's effect.
 
 Registry `collect`:
 
 - `p2id_root` unset
 - asset key empty
-- no key produced a payout (see above)
+
+A key that pays nothing is a no-op, as in a pool collect.
+
+Registry `set_register_fee`:
+
+- note sender differs from `admin`
+- new fee is zero
+- script root differs from `register_note_root`
+- the script root has no schedule entry with its set marker
 
 ## Indexing
 
