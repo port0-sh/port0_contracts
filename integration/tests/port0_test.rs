@@ -3335,6 +3335,7 @@ async fn note_fee_benchmark() -> Result<()> {
     let collect_root = note_root(&contracts.collect_note)?;
     let register_root = note_root(&contracts.register_note)?;
     let registry_collect_root = note_root(&contracts.registry_collect_note)?;
+    let launch_root = note_root(&contracts.launch_note)?;
     let pool_roots: BTreeSet<NoteScriptRoot> =
         [mint_root, burn_root, swap_root, collect_root].into_iter().collect();
     let registry_roots: BTreeSet<NoteScriptRoot> =
@@ -3344,6 +3345,115 @@ async fn note_fee_benchmark() -> Result<()> {
     let fee_key = FungibleAsset::new(fee_faucet_id, 1)?.to_id_word();
 
     let mut measured: Vec<(&'static str, NoteScriptRoot, usize)> = Vec::new();
+
+    // Faucet chain: the deploy consume that creates a network faucet from its
+    // funding note, and the launch that mints the whole supply. Both are what the
+    // token-launch flow in the app pays for, so both are measured rather than
+    // inferred from the pool paths.
+    {
+        let mut builder = MockChain::builder().verification_base_fee(7);
+        let owner = builder.add_existing_wallet(basic_auth())?;
+        let recipient = builder.add_existing_wallet(basic_auth())?;
+        let supply = 1_000_000_u64;
+
+        let faucet = FungibleFaucet::builder()
+            .name(TokenName::new("Launch Token")?)
+            .symbol(TokenSymbol::new("LNCH")?)
+            .decimals(4)
+            .max_supply(AssetAmount::new(supply).context("supply")?)
+            .build()?;
+        let standard = AccountComponent::new(
+            FungibleFaucet::code().clone(),
+            faucet.into_storage_slots(),
+            FungibleFaucet::component_metadata(),
+        )
+        .context("standard faucet component")?;
+        let mut init = InitStorageData::default();
+        init.insert_value(
+            StorageValueName::from_slot_name(&StorageSlotName::new(
+                "network_faucet::network_faucet::owner",
+            )?),
+            Word::from([
+                Felt::ZERO,
+                Felt::ZERO,
+                owner.id().suffix(),
+                owner.id().prefix().as_felt(),
+            ]),
+        )?;
+        init.insert_value(
+            StorageValueName::from_slot_name(&StorageSlotName::new(
+                "network_faucet::network_faucet::launched",
+            )?),
+            Word::from([Felt::ZERO, Felt::ZERO, Felt::ZERO, Felt::ZERO]),
+        )?;
+        let ours = AccountComponent::from_package(contracts.network_faucet.as_ref().clone(), &init)
+            .context("network faucet component")?;
+
+        let mut policy = BasicConstantFeePolicy::new();
+        for root in [launch_root]
+            .into_iter()
+            .chain(AuthNetworkAccount::default_allowed_note_scripts().iter().copied())
+        {
+            policy = policy.with_fee(root, AssetAmount::ZERO);
+        }
+        let fee_policy_manager = FeePolicyManager::builder()
+            .active_fee_policy(policy.into())
+            .fee_faucet_id(fee_faucet_id)
+            .build();
+        let account_builder = AccountBuilder::new([12_u8; 32])
+            .account_type(AccountType::Public)
+            .with_component(ours)
+            .with_component(standard)
+            // The faucet pays its own deploy transaction, and the owner pays for
+            // the launch through a sponsorship; this balance is the funding note.
+            .with_assets([FungibleAsset::new(fee_faucet_id, 10_000)?.into()]);
+        let auth = Auth::NetworkAccount {
+            allowed_script_roots: [launch_root].into_iter().collect(),
+            allowed_tx_script_roots: BTreeSet::new(),
+            fee_policy_manager,
+            sponsorship_policy: SponsorshipPolicy::default(),
+        };
+        let faucet_id = builder
+            .add_account_from_builder(auth, account_builder, AccountState::Exists)
+            .context("failed to build the benchmark faucet")?
+            .id();
+
+        // A launch note: the faucet id, the recipient, a serial, and the tag.
+        let mut launch_storage = account_id_felts(faucet_id).to_vec();
+        launch_storage.extend(account_id_felts(recipient.id()));
+        launch_storage.extend([
+            Felt::from(1_u8),
+            Felt::from(2_u8),
+            Felt::from(3_u8),
+            Felt::from(4_u8),
+        ]);
+        launch_storage.push(Felt::ZERO);
+        let launch_note = build_note(contracts.launch_note.clone(), owner.id(), launch_storage, vec![])?;
+        builder.add_output_note(RawOutputNote::Full(launch_note.clone()));
+
+        // A P2ID note to the faucet, which is the deploy consume: it creates the
+        // account and funds it in one transaction.
+        let funding = P2idNote::builder()
+            .sender(owner.id())
+            .target(faucet_id)
+            .serial_number(serial_num())
+            .asset(Asset::from(FungibleAsset::new(fee_faucet_id, 133)?))
+            .build()?;
+        let funding_note: Note = funding.into();
+        builder.add_output_note(RawOutputNote::Full(funding_note.clone()));
+
+        let mut chain = builder.build()?;
+        measured.push((
+            "faucet deploy",
+            P2idNote::script_root(),
+            bench_consume(&mut chain, faucet_id, &funding_note, None).await?,
+        ));
+        measured.push((
+            "faucet launch",
+            launch_root,
+            bench_consume(&mut chain, faucet_id, &launch_note, None).await?,
+        ));
+    }
 
     // Pool chain: mint, swap, burn, collect. The registry is a network account
     // too, because the pool's collect reads its protocol_fee_to by foreign call.
