@@ -1,0 +1,19 @@
+[package]
+name = "launch_note"
+version = "0.3.0"
+edition = "2024"
+authors = ['mic0 <mic0@mic0.dev>']
+
+[lib]
+# Build this crate as a self-contained, C-style dynamic library
+# This is required to emit the proper Wasm module type
+crate-type = ["cdylib"]
+
+[dependencies]
+# Miden SDK consists of a stdlib (intrinsic functions for VM ops, stdlib functions and types)
+# and transaction kernel API for the Miden rollup
+
+miden = { version = "0.15.0" }
+
+[build-dependencies]
+miden-sdk-build-script-support = { version = "0.15.0" }

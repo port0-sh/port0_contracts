@@ -27,12 +27,13 @@ use miden_client::{
     Felt, Word,
 };
 use miden_mast_package::Package;
-use miden_protocol::asset::{AssetAmount, AssetId};
+use miden_protocol::asset::{AssetAmount, AssetId, TokenSymbol};
 use miden_protocol::block::FeeParameters;
 use miden_protocol::note::{NoteScript, NoteScriptRoot};
 use miden_protocol::testing::account_id::ACCOUNT_ID_FEE_FAUCET;
 use miden_standards::{
     account::auth::{AuthNetworkAccount, SponsorshipPolicy},
+    account::faucets::{FungibleFaucet, TokenName},
     account::fees::{BasicConstantFeePolicy, FeePolicyManager},
     account::inspection::CodeInspection,
     note::costs::NoteCost,
@@ -297,6 +298,8 @@ fn amount_out(
 
 /// Builds every contract package once, out of process.
 struct Contracts {
+    network_faucet: Arc<Package>,
+    launch_note: Arc<Package>,
     port0: Arc<Package>,
     registry: Arc<Package>,
     register_note: Arc<Package>,
@@ -311,6 +314,11 @@ struct Contracts {
 impl Contracts {
     fn build() -> Result<Self> {
         Ok(Self {
+            network_faucet: Arc::new(build_project_in_dir(
+                Path::new("../contracts/network-faucet"),
+                true,
+            )?),
+            launch_note: Arc::new(build_project_in_dir(Path::new("../contracts/launch-note"), true)?),
             port0: Arc::new(build_project_in_dir(Path::new("../contracts/port0"), true)?),
             registry: Arc::new(build_project_in_dir(Path::new("../contracts/pool-registry"), true)?),
             register_note: Arc::new(build_project_in_dir(Path::new("../contracts/register-note"), true)?),
@@ -2422,6 +2430,141 @@ async fn register_rejects_a_pool_with_a_foreign_fee_asset() -> Result<()> {
     assert!(
         result.is_err(),
         "registration must fail when the pool's fee asset is not the chain's"
+    );
+    Ok(())
+}
+
+/// A network faucet launches its whole supply once, and only from its owner.
+///
+/// The faucet is a network account, so creating it needs no allowlist entry; the
+/// owner's launch note mints the maximum supply and pays it out in a P2ID note.
+#[tokio::test]
+async fn network_faucet_launches_the_whole_supply_once() -> Result<()> {
+    let contracts = Contracts::build()?;
+    let mut builder = MockChain::builder().verification_base_fee(7);
+
+    let owner = builder.add_existing_wallet(basic_auth())?;
+    let stranger = builder.add_existing_wallet(basic_auth())?;
+    let recipient = builder.add_existing_wallet(basic_auth())?;
+    let supply = 1_000_000_u64;
+    let launch_root = note_root(&contracts.launch_note)?;
+
+    // The faucet account: the network-faucet component, the standards' fungible
+    // faucet component for the metadata, and the network auth.
+    let faucet = FungibleFaucet::builder()
+        .name(TokenName::new("Launch Token")?)
+        .symbol(TokenSymbol::new("LNCH")?)
+        .decimals(4)
+        .max_supply(AssetAmount::new(supply).context("supply")?)
+        .build()?;
+    let standard = AccountComponent::new(
+        FungibleFaucet::code().clone(),
+        faucet.into_storage_slots(),
+        FungibleFaucet::component_metadata(),
+    )
+    .context("standard faucet component")?;
+    let mut init = InitStorageData::default();
+    init.insert_value(
+        StorageValueName::from_slot_name(
+            &StorageSlotName::new("network_faucet::network_faucet::owner")?,
+        ),
+        Word::from([Felt::ZERO, Felt::ZERO, owner.id().suffix(), owner.id().prefix().as_felt()]),
+    )?;
+    init.insert_value(
+        StorageValueName::from_slot_name(
+            &StorageSlotName::new("network_faucet::network_faucet::launched")?,
+        ),
+        Word::from([Felt::ZERO, Felt::ZERO, Felt::ZERO, Felt::ZERO]),
+    )?;
+    let ours = AccountComponent::from_package(contracts.network_faucet.as_ref().clone(), &init)
+        .context("network faucet component")?;
+
+    let mut policy = BasicConstantFeePolicy::new();
+    for root in [launch_root]
+        .into_iter()
+        .chain(AuthNetworkAccount::default_allowed_note_scripts().iter().copied())
+    {
+        policy = policy.with_fee(root, AssetAmount::ZERO);
+    }
+    let fee_faucet: AccountId = ACCOUNT_ID_FEE_FAUCET.try_into().expect("fee faucet id");
+    let fee_policy_manager = FeePolicyManager::builder()
+        .active_fee_policy(policy.into())
+        .fee_faucet_id(fee_faucet)
+        .build();
+    let account_builder = AccountBuilder::new([11_u8; 32])
+        .account_type(AccountType::Public)
+        .with_component(ours)
+        .with_component(standard)
+        // The faucet pays its launch transaction's fee from its own balance, which
+        // in production arrives in the funding note that creates the account.
+        .with_assets([FungibleAsset::new(fee_faucet, 10_000)?.into()]);
+    let auth = Auth::NetworkAccount {
+        allowed_script_roots: [launch_root].into_iter().collect(),
+        allowed_tx_script_roots: BTreeSet::new(),
+        fee_policy_manager,
+        sponsorship_policy: SponsorshipPolicy::default(),
+    };
+    let faucet_id = builder
+        .add_account_from_builder(auth, account_builder, AccountState::Exists)
+        .context("failed to build the network faucet")?
+        .id();
+
+    let launch_note = |sender: AccountId| -> Result<Note> {
+        let mut storage = account_id_felts(faucet_id).to_vec();
+        storage.extend(account_id_felts(recipient.id()));
+        storage.extend([Felt::from(1_u8), Felt::from(2_u8), Felt::from(3_u8), Felt::from(4_u8)]);
+        storage.push(Felt::ZERO); // output note tag
+        build_note(contracts.launch_note.clone(), sender, storage, vec![])
+    };
+
+    // A launch note from anyone but the owner is rejected.
+    let hostile = launch_note(stranger.id())?;
+    builder.add_output_note(RawOutputNote::Full(hostile.clone()));
+    let owner_note = launch_note(owner.id())?;
+    builder.add_output_note(RawOutputNote::Full(owner_note.clone()));
+
+    let mut chain = builder.build()?;
+    assert!(
+        consume_note(&mut chain, faucet_id, &hostile).await.is_err(),
+        "a launch note from a non-owner must be rejected"
+    );
+    consume_note(&mut chain, faucet_id, &owner_note).await?;
+
+    // The whole supply left the faucet in one P2ID note to the recipient.
+    let paying = chain
+        .committed_notes()
+        .values()
+        .filter_map(|note| match note {
+            MockChainNote::Public(note, _) => Some(note.clone()),
+            _ => None,
+        })
+        .filter_map(|note| {
+            let asset = note
+                .assets()
+                .iter()
+                .find(|asset| asset.id().faucet_id() == faucet_id)
+                .cloned()?;
+            Some((note, asset))
+        })
+        .max_by_key(|(_, asset)| asset.unwrap_fungible().amount().as_u64())
+        .context("no payout note carried the token")?;
+    assert_eq!(
+        paying.1.unwrap_fungible().amount().as_u64(),
+        supply,
+        "the launch must pay the whole supply"
+    );
+
+    // A second launch is rejected: the flag is set.
+    let again = {
+        let mut storage = account_id_felts(faucet_id).to_vec();
+        storage.extend(account_id_felts(recipient.id()));
+        storage.extend([Felt::from(5_u8), Felt::from(6_u8), Felt::from(7_u8), Felt::from(8_u8)]);
+        storage.push(Felt::ZERO);
+        build_note(contracts.launch_note.clone(), owner.id(), storage, vec![])?
+    };
+    assert!(
+        consume_note(&mut chain, faucet_id, &again).await.is_err(),
+        "a token cannot launch twice"
     );
     Ok(())
 }

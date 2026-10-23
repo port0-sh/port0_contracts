@@ -18,13 +18,14 @@ use miden_protocol::account::StorageSlotName;
 
 /// Slot names owned by `miden-standards` 0.17.1: the network auth allowlists
 /// and the constant-fee policy's schedule.
-const SLOTS: [&str; 6] = [
+const SLOTS: [&str; 7] = [
     "miden::standards::auth::network_account::allowed_note_scripts",
     "miden::standards::auth::network_account::allowed_tx_scripts",
     "miden::standards::fees::policies::basic_constant_fee::fee_schedule",
     "miden::standards::auth::network_account::fee_asset_id",
     "miden::standards::auth::network_account::active_fee_policy_proc_root",
     "miden::standards::auth::network_account::allowed_fee_policy_proc_roots",
+    "miden::standards::faucets::fungible::token_config",
 ];
 
 fn main() -> Result<()> {

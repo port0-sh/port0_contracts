@@ -1,0 +1,13 @@
+[package]
+name = "network-faucet"
+version = "0.3.0"
+
+[lib]
+path = "src/lib.rs"
+kind = "account-component"
+namespace = "miden:network-faucet/network-faucet@0.3.0"
+
+
+[dependencies]
+miden-core = "0.35"
+miden-protocol = "0.17"
