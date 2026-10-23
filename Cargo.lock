@@ -643,7 +643,7 @@ checksum = "72f5acc6cb2ba439de613abc23857ec3d78374d8ed5ac84e9d11336e87da8649"
 
 [[package]]
 name = "burn_note"
-version = "0.1.0"
+version = "0.3.0"
 dependencies = [
  "miden",
  "miden-sdk-build-script-support",
@@ -751,7 +751,7 @@ dependencies = [
 
 [[package]]
 name = "collect_note"
-version = "0.1.0"
+version = "0.3.0"
 dependencies = [
  "miden",
  "miden-sdk-build-script-support",
@@ -2014,7 +2014,7 @@ dependencies = [
 
 [[package]]
 name = "integration"
-version = "0.1.0"
+version = "0.3.0"
 dependencies = [
  "anyhow",
  "miden-client",
@@ -3398,7 +3398,7 @@ dependencies = [
 
 [[package]]
 name = "mint_note"
-version = "0.1.0"
+version = "0.3.0"
 dependencies = [
  "miden",
  "miden-sdk-build-script-support",
@@ -3925,7 +3925,7 @@ dependencies = [
 
 [[package]]
 name = "pool_registry"
-version = "0.1.0"
+version = "0.3.0"
 dependencies = [
  "miden",
  "miden-sdk-build-script-support",
@@ -3933,7 +3933,7 @@ dependencies = [
 
 [[package]]
 name = "port0"
-version = "0.1.0"
+version = "0.3.0"
 dependencies = [
  "miden",
  "miden-sdk-build-script-support",
@@ -4461,7 +4461,15 @@ checksum = "d6f6ff9a378485b298a5286656da665ba74413d36db0979633275d2e708145d4"
 
 [[package]]
 name = "register_note"
-version = "0.1.0"
+version = "0.3.0"
+dependencies = [
+ "miden",
+ "miden-sdk-build-script-support",
+]
+
+[[package]]
+name = "registry_config_note"
+version = "0.3.0"
 dependencies = [
  "miden",
  "miden-sdk-build-script-support",
@@ -5088,7 +5096,7 @@ checksum = "b7401a30af6cb5818bb64852270bb722533397edcfc7344954a38f420819ece2"
 
 [[package]]
 name = "swap_note"
-version = "0.1.0"
+version = "0.3.0"
 dependencies = [
  "miden",
  "miden-sdk-build-script-support",

@@ -12,6 +12,13 @@ the other. A protocol fee accrues to the registry's protocol account.
 |----------|------|---------|
 | `port0` | account component | Pool: reserves, LP supply, fee accounting, oracle |
 | `pool-registry` | account component | Accepted pool code commitments, pool set, asset pair index, protocol fee policy |
+
+A deployed pool account carries the `port0` component, the standard basic
+fungible faucet component (the LP token's name, symbol, and decimals, so wallets
+can render it), the standard `CodeInspection` component (the registry reads
+`get_code_commitment` over FPI at registration), and the network auth component
+(note-script allowlist and fee schedule). The SDK installs all four; see
+`port0_sdk/src/pool/lpFaucet.ts` for the LP metadata.
 | `mint-note` | note script | Add liquidity |
 | `burn-note` | note script | Remove liquidity |
 | `swap-note` | note script | Trade |

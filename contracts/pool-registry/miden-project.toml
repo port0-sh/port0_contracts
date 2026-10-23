@@ -1,11 +1,11 @@
 [package]
 name = "pool-registry"
-version = "0.1.0"
+version = "0.3.0"
 
 [lib]
 path = "src/lib.rs"
 kind = "account-component"
-namespace = "miden:pool-registry/pool-registry@0.1.0"
+namespace = "miden:pool-registry/pool-registry@0.3.0"
 
 [dependencies]
 miden-core = "*"

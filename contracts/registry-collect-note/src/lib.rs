@@ -18,6 +18,12 @@
 
 use miden::*;
 
+// The key cap lives in `contracts/collect-fee-hold.rs` with the holds it is
+// coupled to, so the tooling and the scripts cannot disagree.
+include!("../../collect-fee-hold.rs");
+
+const MAX_COLLECT_KEYS: usize = COLLECT_MAX_KEYS;
+
 #[account(pool_registry::PoolRegistry)]
 pub struct NativeAccount;
 
@@ -32,6 +38,10 @@ impl RegistryCollectNote {
         assert!(
             storage.len() >= 6 && (storage.len() - 6) % 4 == 0,
             "Invalid number of arguments in the note"
+        );
+        assert!(
+            (storage.len() - 6) / 4 <= MAX_COLLECT_KEYS,
+            "Too many asset keys in the note"
         );
 
         let registry_id = AccountId::new(storage[0], storage[1]);

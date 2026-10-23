@@ -22,15 +22,12 @@ extern crate alloc;
 
 use miden::*;
 
-/// Cycles added to the transaction's current cycle count when `collect` reserves the fee it will
-/// owe at the epilogue.
-///
-/// The fee is paid after note execution, and the sponsorship note bound to the collect can be
-/// consumed before or after it, so the registry leaves the fee in its vault instead of relying on
-/// the order. `tx::compute_fee` is the kernel's own fee procedure; `MAX_CYCLES` is `2^29`, so
-/// `2^28` reserves `base_fee * 29`, at least the fee of any collect transaction under `2^28`
-/// cycles. The surplus stays in the vault and the next collect sweeps it.
-const COLLECT_EXTRA_CYCLES: u32 = 1 << 28;
+// The reserve `collect` leaves for the transaction's own epilogue charge. The
+// value and its measurement live in `contracts/collect-fee-hold.rs`, shared with
+// the pool contract, the benchmark, and the SDK.
+include!("../../collect-fee-hold.rs");
+
+const COLLECT_FEE_HOLD: u64 = REGISTRY_COLLECT_FEE_HOLD;
 
 /// Root of the `get_code_commitment` procedure of the `CodeInspection` account
 /// component (`miden-standards` 0.17.1).
@@ -57,10 +54,10 @@ fn get_code_commitment_root() -> Word {
 /// pool's package name. Re-print it after any change to `contracts/port0`.
 fn get_registry_identity_root() -> Word {
     Word::new([
-        Felt::new_unchecked(17095815649865696458),
-        Felt::new_unchecked(8916881706855760124),
-        Felt::new_unchecked(5432166796969912291),
-        Felt::new_unchecked(12836174368290222817),
+        Felt::new_unchecked(14005261529289317208),
+        Felt::new_unchecked(1302806639648346144),
+        Felt::new_unchecked(17642524668301917951),
+        Felt::new_unchecked(14693320459952910642),
     ])
 }
 
@@ -80,6 +77,22 @@ struct PoolRegistryStorage {
     allowed_lp_fee_bps: StorageMap<Felt, Felt>,
     #[storage(description = "Script root of the note that pays register fees out")]
     p2id_root: StorageValue<Word>,
+    #[storage(description = "Note allowlist root every pool must carry")]
+    expected_note_allowlist_root: StorageValue<Word>,
+    #[storage(description = "Transaction script allowlist root every pool must carry")]
+    expected_tx_script_allowlist_root: StorageValue<Word>,
+    #[storage(description = "Fee schedule root every pool must carry")]
+    expected_fee_schedule_root: StorageValue<Word>,
+    #[storage(description = "Account allowed to change the register fee")]
+    admin: StorageValue<AccountId>,
+    #[storage(description = "Script root whose fee the admin may change")]
+    register_note_root: StorageValue<Word>,
+    #[storage(description = "Fee asset every pool must charge note fees in")]
+    expected_fee_asset_id: StorageValue<Word>,
+    #[storage(description = "Active fee policy root every pool must carry")]
+    expected_active_fee_policy_root: StorageValue<Word>,
+    #[storage(description = "Allowed fee policy roots every pool must carry")]
+    expected_allowed_fee_policy_roots: StorageValue<Word>,
 }
 
 #[component]
@@ -118,6 +131,21 @@ trait PoolRegistry {
     /// fees toward it, never redirect them.
     #[account_procedure]
     fn collect(&mut self, asset_key: Word, serial_num: Word);
+
+    /// Sets the price of an already scheduled note script, in the fee asset's
+    /// base units.
+    ///
+    /// The register fee is a lever against spam: registration is permissionless,
+    /// so the only defense is what it costs. The fee is an entry in the auth
+    /// component's fee schedule, and this procedure rewrites that entry. The
+    /// script root comes from the note rather than a constant, because a note
+    /// that links this account's interface is recompiled when the interface
+    /// changes, which moves its root: a constant here would be circular. The
+    /// entry must already exist with the set marker, so only notes this registry
+    /// already admits and prices can be re-priced. Only the note sender recorded
+    /// as `admin` may call it.
+    #[account_procedure]
+    fn set_register_fee(&mut self, new_fee: u64, note_root: Word);
 }
 
 #[component]
@@ -170,6 +198,12 @@ impl PoolRegistry for PoolRegistryStorage {
         ]);
         let pool_protocol_fee = identity.get(10).as_canonical_u64();
         let pool_lp_fee = identity.get(11).as_canonical_u64();
+        let pool_p2id_root = Word::new([
+            identity.get(12),
+            identity.get(13),
+            identity.get(14),
+            identity.get(15),
+        ]);
 
         assert!(
             pool_registry.eq(&active_account::get_id()),
@@ -189,6 +223,97 @@ impl PoolRegistry for PoolRegistryStorage {
             self.allowed_lp_fee_bps.get(Felt::new_unchecked(pool_lp_fee)) == Felt::ONE,
             "Pool LP fee is not an allowed tier"
         );
+        // The payout script is pool storage, so the commitment does not pin it.
+        // A hostile root would run an attacker script when a recipient consumes
+        // a payout note, so it must be the standard P2ID root this registry pays
+        // its own fees with.
+        assert!(
+            pool_p2id_root.eq(&self.p2id_root.get()),
+            "Pool payout script root differs from the registry's P2ID root"
+        );
+
+        // The code commitment pins code, not storage: a pool could carry the
+        // accepted component set and an allowlist of its own, admitting a note
+        // that drains the vault through the wallet's `move_asset_to_note`. The
+        // pool exposes its auth roots, and they must match the values this
+        // registry was created with.
+        let auth = tx::execute_foreign_procedure(
+            pool_id,
+            get_auth_identity_root(),
+            tx::ForeignProcedureInputs::new([]),
+        );
+        let fee_identity = tx::execute_foreign_procedure(
+            pool_id,
+            get_fee_identity_root(),
+            tx::ForeignProcedureInputs::new([]),
+        );
+        let expected_fee_asset = self.expected_fee_asset_id.get();
+        let expected_active_policy = self.expected_active_fee_policy_root.get();
+        let expected_allowed_policies = self.expected_allowed_fee_policy_roots.get();
+        assert!(
+            Word::new([
+                fee_identity.get(0),
+                fee_identity.get(1),
+                fee_identity.get(2),
+                fee_identity.get(3),
+            ])
+            .eq(&expected_fee_asset),
+            "Pool fee asset differs from the registry's"
+        );
+        assert!(
+            Word::new([
+                fee_identity.get(4),
+                fee_identity.get(5),
+                fee_identity.get(6),
+                fee_identity.get(7),
+            ])
+            .eq(&expected_active_policy),
+            "Pool active fee policy differs from the registry's"
+        );
+        assert!(
+            Word::new([
+                fee_identity.get(8),
+                fee_identity.get(9),
+                fee_identity.get(10),
+                fee_identity.get(11),
+            ])
+            .eq(&expected_allowed_policies),
+            "Pool allowed fee policies differ from the registry's"
+        );
+
+        let expected_note_allowlist = self.expected_note_allowlist_root.get();
+        let expected_tx_script_allowlist = self.expected_tx_script_allowlist_root.get();
+        let expected_fee_schedule = self.expected_fee_schedule_root.get();
+        assert!(
+            Word::new([
+                auth.get(0),
+                auth.get(1),
+                auth.get(2),
+                auth.get(3),
+            ])
+            .eq(&expected_note_allowlist),
+            "Pool note allowlist differs from the registry's"
+        );
+        assert!(
+            Word::new([
+                auth.get(4),
+                auth.get(5),
+                auth.get(6),
+                auth.get(7),
+            ])
+            .eq(&expected_tx_script_allowlist),
+            "Pool transaction script allowlist differs from the registry's"
+        );
+        assert!(
+            Word::new([
+                auth.get(8),
+                auth.get(9),
+                auth.get(10),
+                auth.get(11),
+            ])
+            .eq(&expected_fee_schedule),
+            "Pool fee schedule differs from the registry's"
+        );
 
         self.pools.set(pool_key, commitment);
         self.assets_to_pool.set(pair_key, pool_key);
@@ -196,6 +321,37 @@ impl PoolRegistry for PoolRegistryStorage {
 
     fn pool_code_commitment(&self, pool_id: AccountId) -> Word {
         self.pools.get(pool_id_key(pool_id))
+    }
+
+    fn set_register_fee(&mut self, new_fee: u64, note_root: Word) {
+        assert!(
+            active_note::get_sender().eq(&self.admin.get()),
+            "Only the registry admin may change the register fee"
+        );
+        assert!(new_fee > 0, "The register fee must be positive");
+        // Only the register note's own price moves: repricing the collect note
+        // would silently disable permissionless collection, and repricing the
+        // config note would break this path itself.
+        assert!(
+            note_root.eq(&self.register_note_root.get()),
+            "Only the register note's fee may be changed"
+        );
+        // The trailing felt of a schedule entry is the set marker.
+        let current = storage::get_map_item(fee_schedule_slot(), &note_root);
+        assert!(
+            current[3].as_canonical_u64() == 1,
+            "The note script is not scheduled by this registry"
+        );
+        storage::set_map_item(
+            fee_schedule_slot(),
+            note_root,
+            Word::new([
+                Felt::new_unchecked(new_fee),
+                Felt::ZERO,
+                Felt::ZERO,
+                Felt::ONE,
+            ]),
+        );
     }
 
     fn pool_for_assets(&self, asset_0: AccountId, asset_1: AccountId) -> Word {
@@ -236,7 +392,7 @@ impl PoolRegistry for PoolRegistryStorage {
         // paid at the epilogue; without this, a sweep of the whole balance would leave nothing to
         // pay it with, which is what the unsponsored registry collect hit.
         let fee_hold = if asset_key.eq(&Word::from(tx::get_fee_asset_id())) {
-            tx::compute_fee(COLLECT_EXTRA_CYCLES, Word::default()).as_u64()
+            COLLECT_FEE_HOLD
         } else {
             0
         };
@@ -270,6 +426,38 @@ impl PoolRegistry for PoolRegistryStorage {
 /// The executing transaction must be able to resolve the pool as a foreign
 /// account; the node's network transaction builder fetches it from the chain
 /// on demand.
+/// Root of the pool's `get_auth_identity` procedure (`miden-standards` 0.17.1
+/// component set, `contracts/port0`). Printed by
+/// `cargo run -p integration --bin registry_roots --release -- port0`.
+fn get_auth_identity_root() -> Word {
+    Word::new([
+        Felt::new_unchecked(129405166995428920),
+        Felt::new_unchecked(595689319188780278),
+        Felt::new_unchecked(10001552390825198366),
+        Felt::new_unchecked(5907709929831835989),
+    ])
+}
+
+/// Root of the pool's `get_fee_identity` procedure, printed the same way.
+fn get_fee_identity_root() -> Word {
+    Word::new([
+        Felt::new_unchecked(13892548840974148246),
+        Felt::new_unchecked(18284004844081850151),
+        Felt::new_unchecked(13397762301543512010),
+        Felt::new_unchecked(7964410352148548905),
+    ])
+}
+
+/// The auth component's constant-fee schedule slot. A map slot's item is its
+/// Merkle root; the entries are `note_script_root => [fee_amount, 0, 0, 1]`, and
+/// the trailing `1` is the set marker `compute_note_fee` asserts.
+fn fee_schedule_slot() -> StorageSlotId {
+    StorageSlotId::new(
+        Felt::new_unchecked(11414504603391865159),
+        Felt::new_unchecked(11788117098168477216),
+    )
+}
+
 fn pool_code_commitment_of(pool_id: AccountId) -> Word {
     let outputs = tx::execute_foreign_procedure(
         pool_id,

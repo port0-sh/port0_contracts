@@ -1,0 +1,13 @@
+[package]
+name = "registry_config_note"
+version = "0.3.0"
+
+[lib]
+path = "src/lib.rs"
+kind = "note"
+namespace = "miden:registry-config-note/miden-registry-config-note@0.3.0"
+
+[dependencies]
+miden-core = "0.35"
+miden-protocol = "0.17"
+pool-registry = { path = "../pool-registry" }

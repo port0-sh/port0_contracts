@@ -6,14 +6,19 @@
 //! The pool account issues its own LP token, so the LP token's
 //! asset key is derived from the pool account id.
 
-use std::{collections::BTreeSet, path::Path, sync::Arc};
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    path::Path,
+    sync::Arc,
+};
 
 use anyhow::{Context, Result};
 use integration::helpers::build_project_in_dir;
 use miden_client::{
     account::{
         component::{InitStorageData, StorageValueName},
-        AccountBuilder, AccountComponent, AccountId, AccountType, StorageSlotName,
+        StorageMapKey,
+        Account, AccountBuilder, AccountComponent, AccountId, AccountType, StorageSlotName,
     },
     asset::{Asset, FungibleAsset},
     auth::AuthSchemeId,
@@ -22,10 +27,20 @@ use miden_client::{
     Felt, Word,
 };
 use miden_mast_package::Package;
+use miden_protocol::asset::{AssetAmount, AssetId};
+use miden_protocol::block::FeeParameters;
+use miden_protocol::note::{NoteScript, NoteScriptRoot};
+use miden_protocol::testing::account_id::ACCOUNT_ID_FEE_FAUCET;
 use miden_standards::{
-    account::inspection::CodeInspection, note::P2idNote, testing::note::NoteBuilder,
+    account::auth::{AuthNetworkAccount, SponsorshipPolicy},
+    account::fees::{BasicConstantFeePolicy, FeePolicyManager},
+    account::inspection::CodeInspection,
+    note::costs::NoteCost,
+    note::P2idNote,
+    testing::note::NoteBuilder,
 };
 use miden_testing::{AccountState, Auth, MockChain, MockChainBuilder, MockChainNote};
+use miden_tx::NetworkNotePricer;
 
 /// Storage slot prefix shared by every `port0` component slot.
 ///
@@ -66,6 +81,9 @@ fn registry_init_storage(
     protocol_fee_to: AccountId,
     protocol_fee_share_bps: u32,
     accepted: Word,
+    expected_auth: [Word; 6],
+    register_note_root: Word,
+    admin: AccountId,
 ) -> Result<InitStorageData> {
     let mut init = InitStorageData::default();
     init.insert_map_entry(
@@ -97,6 +115,41 @@ fn registry_init_storage(
             Felt::ONE,
         )?;
     }
+    // The pool auth roots the registry compares every registration against. A
+    // registry seeded with zeros accepts nothing, so a deploy that forgets them
+    // fails closed.
+    init.insert_value(
+        StorageValueName::from_slot_name(&registry_slot("expected_note_allowlist_root")),
+        expected_auth[0],
+    )?;
+    init.insert_value(
+        StorageValueName::from_slot_name(&registry_slot("expected_tx_script_allowlist_root")),
+        expected_auth[1],
+    )?;
+    init.insert_value(
+        StorageValueName::from_slot_name(&registry_slot("expected_fee_schedule_root")),
+        expected_auth[2],
+    )?;
+    init.insert_value(
+        StorageValueName::from_slot_name(&registry_slot("admin")),
+        Word::from([Felt::ZERO, Felt::ZERO, admin.suffix(), admin.prefix().as_felt()]),
+    )?;
+    init.insert_value(
+        StorageValueName::from_slot_name(&registry_slot("register_note_root")),
+        register_note_root,
+    )?;
+    init.insert_value(
+        StorageValueName::from_slot_name(&registry_slot("expected_fee_asset_id")),
+        expected_auth[3],
+    )?;
+    init.insert_value(
+        StorageValueName::from_slot_name(&registry_slot("expected_active_fee_policy_root")),
+        expected_auth[4],
+    )?;
+    init.insert_value(
+        StorageValueName::from_slot_name(&registry_slot("expected_allowed_fee_policy_roots")),
+        expected_auth[5],
+    )?;
     Ok(init)
 }
 
@@ -140,6 +193,8 @@ fn add_registry_account(
     protocol_fee_to: AccountId,
     protocol_fee_share_bps: u32,
     accepted: Word,
+    expected_auth: [Word; 6],
+    register_note_root: Word,
 ) -> Result<AccountId> {
     add_registry_account_with_assets(
         builder,
@@ -147,6 +202,8 @@ fn add_registry_account(
         protocol_fee_to,
         protocol_fee_share_bps,
         accepted,
+        expected_auth,
+        register_note_root,
         vec![],
     )
 }
@@ -158,9 +215,18 @@ fn add_registry_account_with_assets(
     protocol_fee_to: AccountId,
     protocol_fee_share_bps: u32,
     accepted: Word,
+    expected_auth: [Word; 6],
+    register_note_root: Word,
     seed_assets: Vec<Asset>,
 ) -> Result<AccountId> {
-    let init = registry_init_storage(protocol_fee_to, protocol_fee_share_bps, accepted)?;
+    let init = registry_init_storage(
+        protocol_fee_to,
+        protocol_fee_share_bps,
+        accepted,
+        expected_auth,
+        register_note_root,
+        protocol_fee_to,
+    )?;
     let component = AccountComponent::from_package(package.as_ref().clone(), &init)
         .context("failed to build account component from pool-registry package")?;
     let account_builder = AccountBuilder::new([6_u8; 32])
@@ -235,6 +301,7 @@ struct Contracts {
     registry: Arc<Package>,
     register_note: Arc<Package>,
     registry_collect_note: Arc<Package>,
+    registry_config_note: Arc<Package>,
     mint_note: Arc<Package>,
     burn_note: Arc<Package>,
     swap_note: Arc<Package>,
@@ -251,6 +318,10 @@ impl Contracts {
                 Path::new("../contracts/registry-collect-note"),
                 true,
             )?),
+            registry_config_note: Arc::new(build_project_in_dir(
+                Path::new("../contracts/registry-config-note"),
+                true,
+            )?),
             mint_note: Arc::new(build_project_in_dir(Path::new("../contracts/mint-note"), true)?),
             burn_note: Arc::new(build_project_in_dir(Path::new("../contracts/burn-note"), true)?),
             swap_note: Arc::new(build_project_in_dir(Path::new("../contracts/swap-note"), true)?),
@@ -263,6 +334,7 @@ impl Contracts {
 }
 
 /// Builds the `InitStorageData` for a pool that points at `registry_id`.
+/** The standard pool seed: the payout root is the standard P2ID script. */
 fn pool_init_storage_with_registry(
     token0_key: Word,
     token1_key: Word,
@@ -271,6 +343,30 @@ fn pool_init_storage_with_registry(
     lp_fee_bps: u32,
     protocol_fee_share_bps: u32,
     initial_reserves: (u64, u64),
+) -> Result<InitStorageData> {
+    pool_init_storage_full(
+        token0_key,
+        token1_key,
+        admin,
+        registry_id,
+        lp_fee_bps,
+        protocol_fee_share_bps,
+        initial_reserves,
+        Word::from(P2idNote::script_root()),
+    )
+}
+
+/// The pool seed with a caller-chosen payout script root.
+#[allow(clippy::too_many_arguments)]
+fn pool_init_storage_full(
+    token0_key: Word,
+    token1_key: Word,
+    admin: AccountId,
+    registry_id: AccountId,
+    lp_fee_bps: u32,
+    protocol_fee_share_bps: u32,
+    initial_reserves: (u64, u64),
+    p2id_root: Word,
 ) -> Result<InitStorageData> {
     let mut init = InitStorageData::default();
     init.insert_value(
@@ -304,7 +400,7 @@ fn pool_init_storage_with_registry(
     )?;
     init.insert_value(
         StorageValueName::from_slot_name(&slot("p2id_root")),
-        Word::from(P2idNote::script_root()),
+        p2id_root,
     )?;
     init.insert_value(StorageValueName::from_slot_name(&slot("protocol_pot")), Word::default())?;
     init.insert_value(
@@ -434,6 +530,283 @@ fn add_pool_account_with_reserves(
         .add_account_from_builder(basic_auth(), account_builder, AccountState::Exists)
         .context("failed to add pool account")?;
     Ok(account.id())
+}
+
+/// A network account in its production shape: the given note roots allowlisted
+/// and a fee policy, so a benchmark measures the cycles the node charges for
+/// consuming a note.
+fn build_network_account(
+    builder: &mut MockChainBuilder,
+    seed: [u8; 32],
+    component: AccountComponent,
+    seed_assets: Vec<Asset>,
+    allowed_roots: BTreeSet<NoteScriptRoot>,
+) -> Result<Account> {
+    // A constant policy aborts fee estimation for a root without an entry, so
+    // schedule a zero fee for every allowlisted root. A benchmark measures the
+    // epilogue fee, not the schedule price.
+    let mut policy = BasicConstantFeePolicy::new();
+    for root in allowed_roots
+        .iter()
+        .chain(AuthNetworkAccount::default_allowed_note_scripts().iter())
+    {
+        policy = policy.with_fee(*root, AssetAmount::ZERO);
+    }
+    let fee_policy_manager = FeePolicyManager::builder()
+        .active_fee_policy(policy.into())
+        .fee_faucet_id(ACCOUNT_ID_FEE_FAUCET.try_into().expect("valid fee faucet id"))
+        .build();
+
+    let account_builder = AccountBuilder::new(seed)
+        .account_type(AccountType::Public)
+        .with_component(component)
+        .with_component(CodeInspection::from(CodeInspection))
+        .with_assets(seed_assets);
+
+    let auth = Auth::NetworkAccount {
+        allowed_script_roots: allowed_roots,
+        allowed_tx_script_roots: BTreeSet::new(),
+        fee_policy_manager,
+        sponsorship_policy: SponsorshipPolicy::default(),
+    };
+
+    builder
+        .add_account_from_builder(auth, account_builder, AccountState::Exists)
+        .context("failed to add network account")
+}
+
+/// A pool account in its production shape (network auth).
+#[allow(clippy::too_many_arguments)]
+fn add_pool_account_network(
+    builder: &mut MockChainBuilder,
+    package: Arc<Package>,
+    token0_key: Word,
+    token1_key: Word,
+    registry_id: AccountId,
+    initial_reserves: (u64, u64),
+    seed_assets: Vec<Asset>,
+    allowed_roots: BTreeSet<NoteScriptRoot>,
+) -> Result<AccountId> {
+    add_pool_account_network_with_fees(
+        builder,
+        package,
+        token0_key,
+        token1_key,
+        registry_id,
+        PROTOCOL_FEE_SHARE_BPS,
+        initial_reserves,
+        seed_assets,
+        allowed_roots,
+    )
+}
+
+/// A pool with the accepted components but a payout script root of its choosing.
+fn add_pool_account_network_with_p2id(
+    builder: &mut MockChainBuilder,
+    package: Arc<Package>,
+    token0_key: Word,
+    token1_key: Word,
+    registry_id: AccountId,
+    p2id_root: Word,
+    allowed_roots: BTreeSet<NoteScriptRoot>,
+) -> Result<AccountId> {
+    let init = pool_init_storage_full(
+        token0_key,
+        token1_key,
+        registry_id,
+        registry_id,
+        LP_FEE_BPS,
+        PROTOCOL_FEE_SHARE_BPS,
+        (0, 0),
+        p2id_root,
+    )?;
+    let component = AccountComponent::from_package(package.as_ref().clone(), &init)
+        .context("failed to build account component from port0 package")?;
+    let account = build_network_account(builder, [7_u8; 32], component, vec![], allowed_roots)?;
+    Ok(account.id())
+}
+
+/// The same pool with an explicit protocol fee rate, for the registry's rate
+/// check.
+#[allow(clippy::too_many_arguments)]
+fn add_pool_account_network_with_fees(
+    builder: &mut MockChainBuilder,
+    package: Arc<Package>,
+    token0_key: Word,
+    token1_key: Word,
+    registry_id: AccountId,
+    protocol_fee_share_bps: u32,
+    initial_reserves: (u64, u64),
+    seed_assets: Vec<Asset>,
+    allowed_roots: BTreeSet<NoteScriptRoot>,
+) -> Result<AccountId> {
+    let init = pool_init_storage_with_registry(
+        token0_key,
+        token1_key,
+        registry_id,
+        registry_id,
+        LP_FEE_BPS,
+        protocol_fee_share_bps,
+        initial_reserves,
+    )?;
+    let component = AccountComponent::from_package(package.as_ref().clone(), &init)
+        .context("failed to build account component from port0 package")?;
+    let account = build_network_account(builder, [7_u8; 32], component, seed_assets, allowed_roots)?;
+    Ok(account.id())
+}
+
+/// The code commitment of the network-auth pool, which is what the registry's
+/// accepted-commitments map must hold. It depends on the component set, not on
+/// storage or the seed.
+/// What the registry must accept and require for production pools: the code
+/// commitment of the network-auth pool, and that pool's auth roots.
+struct PoolNetworkFixture {
+    commitment: Word,
+    auth_roots: [Word; 6],
+}
+
+/// The storage items the pool's auth identity exposes, read from a built
+/// account: the two allowlist roots, the fee schedule root, then the fee asset
+/// and the two policy roots.
+fn pool_auth_roots_of(account: &Account) -> Result<[Word; 6]> {
+    let storage = account.storage();
+    let mut roots = [Word::default(); 6];
+    for (index, name) in POOL_AUTH_SLOTS.iter().enumerate() {
+        let slot = StorageSlotName::new(*name).context("invalid auth slot name")?;
+        let item = storage
+            .get_item(&slot)
+            .with_context(|| format!("pool has no {name} storage"))?;
+        roots[index] = Word::from(*item);
+    }
+    Ok(roots)
+}
+
+/// The slot names of the pool's auth component, in the order `get_auth_identity`
+/// returns them.
+const POOL_AUTH_SLOTS: [&str; 6] = [
+    "miden::standards::auth::network_account::allowed_note_scripts",
+    "miden::standards::auth::network_account::allowed_tx_scripts",
+    "miden::standards::fees::policies::basic_constant_fee::fee_schedule",
+    "miden::standards::auth::network_account::fee_asset_id",
+    "miden::standards::auth::network_account::active_fee_policy_proc_root",
+    "miden::standards::auth::network_account::allowed_fee_policy_proc_roots",
+];
+
+fn pool_code_commitment_network(
+    builder: &mut MockChainBuilder,
+    package: Arc<Package>,
+    token0_key: Word,
+    token1_key: Word,
+    placeholder_registry: AccountId,
+    allowed_roots: &BTreeSet<NoteScriptRoot>,
+) -> Result<PoolNetworkFixture> {
+    let init = pool_init_storage_with_registry(
+        token0_key,
+        token1_key,
+        placeholder_registry,
+        placeholder_registry,
+        LP_FEE_BPS,
+        PROTOCOL_FEE_SHARE_BPS,
+        (0, 0),
+    )?;
+    let component = AccountComponent::from_package(package.as_ref().clone(), &init)
+        .context("failed to build account component from port0 package")?;
+    let account =
+        build_network_account(builder, [8_u8; 32], component, vec![], allowed_roots.clone())?;
+    Ok(PoolNetworkFixture {
+        commitment: account.code().commitment(),
+        auth_roots: pool_auth_roots_of(&account)?,
+    })
+}
+
+/// The register note's script root, which the registry stores so the admin's fee
+/// setter can only move that one entry.
+fn register_note_root(contracts: &Contracts) -> Result<Word> {
+    Ok(Word::from(NoteScript::from_package(
+        contracts.register_note.as_ref(),
+    )?.root()))
+}
+
+/// Auth roots for a registry that is never asked to register a pool: zeros are
+/// the fail-closed value, since no real pool carries a zero allowlist root.
+fn zero_auth_roots() -> [Word; 6] {
+    [Word::from([Felt::ZERO, Felt::ZERO, Felt::ZERO, Felt::ZERO]); 6]
+}
+
+/// The script root of a compiled note package.
+fn note_root(package: &Arc<Package>) -> Result<NoteScriptRoot> {
+    Ok(NoteScript::from_package(package.as_ref())?.root())
+}
+
+/// The note roots a production pool admits (its own four note scripts; the
+/// network auth adds the protocol defaults itself).
+fn pool_note_roots(contracts: &Contracts) -> Result<BTreeSet<NoteScriptRoot>> {
+    Ok([
+        note_root(&contracts.mint_note)?,
+        note_root(&contracts.burn_note)?,
+        note_root(&contracts.swap_note)?,
+        note_root(&contracts.collect_note)?,
+    ]
+    .into_iter()
+    .collect())
+}
+
+/// The note roots a production registry admits.
+fn registry_note_roots(contracts: &Contracts) -> Result<BTreeSet<NoteScriptRoot>> {
+    Ok([
+        note_root(&contracts.register_note)?,
+        note_root(&contracts.registry_collect_note)?,
+        note_root(&contracts.registry_config_note)?,
+    ]
+    .into_iter()
+    .collect())
+}
+
+/// A registry account in its production shape (network auth).
+#[allow(clippy::too_many_arguments)]
+fn add_registry_account_network(
+    builder: &mut MockChainBuilder,
+    package: Arc<Package>,
+    protocol_fee_to: AccountId,
+    protocol_fee_share_bps: u32,
+    accepted: Word,
+    expected_auth: [Word; 6],
+    register_note_root: Word,
+    seed_assets: Vec<Asset>,
+    allowed_roots: BTreeSet<NoteScriptRoot>,
+) -> Result<AccountId> {
+    let init = registry_init_storage(
+        protocol_fee_to,
+        protocol_fee_share_bps,
+        accepted,
+        expected_auth,
+        register_note_root,
+        protocol_fee_to,
+    )?;
+    let component = AccountComponent::from_package(package.as_ref().clone(), &init)
+        .context("failed to build account component from pool-registry package")?;
+    let account = build_network_account(builder, [5_u8; 32], component, seed_assets, allowed_roots)?;
+    Ok(account.id())
+}
+
+/// Executes `account` consuming `note`, proves a block, and returns the total
+/// cycles the transaction executed. `foreign` is declared when the script calls
+/// it.
+async fn bench_consume(
+    chain: &mut MockChain,
+    account: AccountId,
+    note: &Note,
+    foreign: Option<AccountId>,
+) -> Result<usize> {
+    let mut tx = chain.build_transaction(account).authenticated_input_note(note.id());
+    if let Some(foreign_id) = foreign {
+        tx = tx.foreign_accounts(vec![chain.get_foreign_account_inputs(foreign_id)?]);
+    }
+    let executed = tx.build()?.execute().await?;
+    let cycles = executed.measurements().total_cycles();
+    chain.add_pending_executed_transaction(&executed)?;
+    chain.prove_next_block()?;
+    Ok(cycles)
 }
 
 /// Builds a note from a compiled package.
@@ -826,6 +1199,8 @@ async fn collect_pays_registry_designated_recipient() -> Result<()> {
         registry_fee_to.id(),
         PROTOCOL_FEE_SHARE_BPS,
         accepted,
+        zero_auth_roots(),
+        register_note_root(&contracts)?,
     )?;
 
     let reserve0 = 1_000_000_u64;
@@ -1698,24 +2073,35 @@ async fn register_lists_a_matching_pool() -> Result<()> {
     let token0_key = FungibleAsset::new(token0_faucet.id(), 1)?.to_id_word();
     let token1_key = FungibleAsset::new(token1_faucet.id(), 1)?.to_id_word();
 
-    let accepted = pool_code_commitment(&mut builder, &contracts, token0_key, token1_key, admin.id())?;
-    let registry = add_registry_account(
-        &mut builder,
-        contracts.registry.clone(),
-        fee_to.id(),
-        PROTOCOL_FEE_SHARE_BPS,
-        accepted,
-    )?;
-    let pool = add_pool_account_with_registry(
+    let pool_roots = pool_note_roots(&contracts)?;
+    let fixture = pool_code_commitment_network(
         &mut builder,
         contracts.port0.clone(),
         token0_key,
         token1_key,
         admin.id(),
-        registry,
-        LP_FEE_BPS,
+        &pool_roots,
+    )?;
+    let registry = add_registry_account_network(
+        &mut builder,
+        contracts.registry.clone(),
+        fee_to.id(),
         PROTOCOL_FEE_SHARE_BPS,
+        fixture.commitment,
+        fixture.auth_roots,
+        register_note_root(&contracts)?,
         vec![],
+        registry_note_roots(&contracts)?,
+    )?;
+    let pool = add_pool_account_network(
+        &mut builder,
+        contracts.port0.clone(),
+        token0_key,
+        token1_key,
+        registry,
+        (0, 0),
+        vec![],
+        pool_roots,
     )?;
 
     let register_note = build_note(
@@ -1748,25 +2134,37 @@ async fn register_rejects_a_pool_with_a_foreign_fee_rate() -> Result<()> {
     let token0_key = FungibleAsset::new(token0_faucet.id(), 1)?.to_id_word();
     let token1_key = FungibleAsset::new(token1_faucet.id(), 1)?.to_id_word();
 
-    let accepted = pool_code_commitment(&mut builder, &contracts, token0_key, token1_key, admin.id())?;
-    let registry = add_registry_account(
-        &mut builder,
-        contracts.registry.clone(),
-        fee_to.id(),
-        PROTOCOL_FEE_SHARE_BPS,
-        accepted,
-    )?;
-    // One basis point off the registry's rate.
-    let pool = add_pool_account_with_registry(
+    let pool_roots = pool_note_roots(&contracts)?;
+    let fixture = pool_code_commitment_network(
         &mut builder,
         contracts.port0.clone(),
         token0_key,
         token1_key,
         admin.id(),
-        registry,
-        LP_FEE_BPS,
-        PROTOCOL_FEE_SHARE_BPS + 1,
+        &pool_roots,
+    )?;
+    let registry = add_registry_account_network(
+        &mut builder,
+        contracts.registry.clone(),
+        fee_to.id(),
+        PROTOCOL_FEE_SHARE_BPS,
+        fixture.commitment,
+        fixture.auth_roots,
+        register_note_root(&contracts)?,
         vec![],
+        registry_note_roots(&contracts)?,
+    )?;
+    // One basis point off the registry's rate; the auth roots still match.
+    let pool = add_pool_account_network_with_fees(
+        &mut builder,
+        contracts.port0.clone(),
+        token0_key,
+        token1_key,
+        registry,
+        PROTOCOL_FEE_SHARE_BPS + 1,
+        (0, 0),
+        vec![],
+        pool_roots,
     )?;
 
     let register_note = build_note(
@@ -1782,6 +2180,387 @@ async fn register_rejects_a_pool_with_a_foreign_fee_rate() -> Result<()> {
     assert!(
         result.is_err(),
         "registration must fail when the pool's protocol fee differs"
+    );
+    Ok(())
+}
+
+// The collect reserves the contracts enforce, from the shared source. Including
+// the same file the contracts include is what makes the assertion below able to
+// fail when a contract is short.
+include!("../../contracts/collect-fee-hold.rs");
+
+/// The kernel's transaction fee for a cycle count, in base units at
+/// `verification_base_fee` 7.
+///
+/// The kernel rounds the cycle count up to the next power of two and charges
+/// `base_fee * (log2 + 1)`, so floor-log2 understates the fee by one bucket
+/// whenever the count is not an exact power of two.
+fn kernel_fee(cycles: u32) -> u64 {
+    let rounded = (cycles as u64).next_power_of_two();
+    let log2 = 64 - rounded.leading_zeros();
+    7 * u64::from(log2)
+}
+
+/// The registry's scheduled price for a note script root, read from its auth
+/// component's fee schedule.
+fn registry_fee_schedule(
+    chain: &MockChain,
+    registry: AccountId,
+    script: &Arc<Package>,
+) -> Result<u64> {
+    let account = chain.committed_account(registry)?;
+    let storage = account.storage();
+    let slot = StorageSlotName::new(
+        "miden::standards::fees::policies::basic_constant_fee::fee_schedule",
+    )?;
+    let root = Word::from(NoteScript::from_package(script.as_ref())?.root());
+    let entry = storage
+        .get_map_item(&slot, StorageMapKey::new(root))
+        .context("the register root has no schedule entry")?;
+    Ok(entry[0].as_canonical_u64())
+}
+
+/// The admin can raise the register fee, and the registry's own schedule is what
+/// changes: the fee is a schedule entry, not a separate copy.
+#[tokio::test]
+async fn registry_admin_sets_the_register_fee() -> Result<()> {
+    let contracts = Contracts::build()?;
+    let mut builder = MockChain::builder();
+
+    let fee_faucet =
+        builder.add_existing_basic_faucet(basic_auth(), "USDCX", 2_000_000, Some(2_000_000))?;
+    let admin = builder.add_existing_wallet(basic_auth())?;
+    let fee_to = builder.add_existing_wallet(basic_auth())?;
+
+    let registry_roots = registry_note_roots(&contracts)?;
+    let registry = add_registry_account_network(
+        &mut builder,
+        contracts.registry.clone(),
+        fee_to.id(),
+        PROTOCOL_FEE_SHARE_BPS,
+        Word::default(),
+        zero_auth_roots(),
+        register_note_root(&contracts)?,
+        vec![FungibleAsset::new(fee_faucet.id(), 10_000)?.into()],
+        registry_roots,
+    )?;
+
+    let new_fee = 1_000_000_u64;
+    // The register note's root is what the fee schedule is keyed by, and it moves
+    // whenever the registry's interface changes, so it comes from the build.
+    let register_root = register_note_root(&contracts)?;
+    // `add_registry_account_network` makes the protocol fee recipient the admin,
+    // so that is the account whose config note the registry accepts.
+    let config_note = build_note(
+        contracts.registry_config_note.clone(),
+        fee_to.id(),
+        vec![
+            registry.prefix().as_felt(),
+            registry.suffix(),
+            Felt::new_unchecked(new_fee),
+            register_root[0],
+            register_root[1],
+            register_root[2],
+            register_root[3],
+        ],
+        vec![],
+    )?;
+    builder.add_output_note(RawOutputNote::Full(config_note.clone()));
+
+    let mut chain = builder.build()?;
+    consume_note(&mut chain, registry, &config_note).await?;
+
+    assert_eq!(
+        registry_fee_schedule(&chain, registry, &contracts.register_note)?,
+        new_fee,
+        "the register fee must be the value the admin set"
+    );
+    Ok(())
+}
+
+/// A config note from anyone but the admin is rejected, so the price cannot be
+/// changed by a passer-by.
+#[tokio::test]
+async fn registry_rejects_a_foreign_fee_change() -> Result<()> {
+    let contracts = Contracts::build()?;
+    let mut builder = MockChain::builder();
+
+    let fee_faucet =
+        builder.add_existing_basic_faucet(basic_auth(), "USDCX", 2_000_000, Some(2_000_000))?;
+    let admin = builder.add_existing_wallet(basic_auth())?;
+    let stranger = builder.add_existing_wallet(basic_auth())?;
+    let fee_to = builder.add_existing_wallet(basic_auth())?;
+
+    let registry = add_registry_account_network(
+        &mut builder,
+        contracts.registry.clone(),
+        fee_to.id(),
+        PROTOCOL_FEE_SHARE_BPS,
+        Word::default(),
+        zero_auth_roots(),
+        register_note_root(&contracts)?,
+        vec![FungibleAsset::new(fee_faucet.id(), 10_000)?.into()],
+        registry_note_roots(&contracts)?,
+    )?;
+
+    let register_root = register_note_root(&contracts)?;
+    let config_note = build_note(
+        contracts.registry_config_note.clone(),
+        stranger.id(),
+        vec![
+            registry.prefix().as_felt(),
+            registry.suffix(),
+            Felt::new_unchecked(42),
+            register_root[0],
+            register_root[1],
+            register_root[2],
+            register_root[3],
+        ],
+        vec![],
+    )?;
+    builder.add_output_note(RawOutputNote::Full(config_note.clone()));
+
+    let mut chain = builder.build()?;
+    let result = consume_note(&mut chain, registry, &config_note).await;
+    assert!(
+        result.is_err(),
+        "a config note from a non-admin must be rejected"
+    );
+    Ok(())
+}
+
+/// A pool that would charge its note fees in an asset other than the chain's
+/// fee asset is rejected. The fee policy runs in the pool's context during fee
+/// estimation, so an unpinned value leaves a listed pool that no note can be
+/// consumed against.
+#[tokio::test]
+async fn register_rejects_a_pool_with_a_foreign_fee_asset() -> Result<()> {
+    let contracts = Contracts::build()?;
+    let mut builder = MockChain::builder();
+
+    let token0_faucet =
+        builder.add_existing_basic_faucet(basic_auth(), "ALPHA", 2_000_000, Some(2_000_000))?;
+    let token1_faucet =
+        builder.add_existing_basic_faucet(basic_auth(), "BETA", 2_000_000, Some(2_000_000))?;
+    let admin = builder.add_existing_wallet(basic_auth())?;
+    let fee_to = builder.add_existing_wallet(basic_auth())?;
+
+    let token0_key = FungibleAsset::new(token0_faucet.id(), 1)?.to_id_word();
+    let token1_key = FungibleAsset::new(token1_faucet.id(), 1)?.to_id_word();
+
+    let pool_roots = pool_note_roots(&contracts)?;
+    let fixture = pool_code_commitment_network(
+        &mut builder,
+        contracts.port0.clone(),
+        token0_key,
+        token1_key,
+        admin.id(),
+        &pool_roots,
+    )?;
+    let registry = add_registry_account_network(
+        &mut builder,
+        contracts.registry.clone(),
+        fee_to.id(),
+        PROTOCOL_FEE_SHARE_BPS,
+        fixture.commitment,
+        fixture.auth_roots,
+        register_note_root(&contracts)?,
+        vec![],
+        registry_note_roots(&contracts)?,
+    )?;
+
+    // The pool carries the accepted components but charges in ALPHA instead of
+    // the chain fee asset.
+    let init = pool_init_storage_full(
+        token0_key,
+        token1_key,
+        registry,
+        registry,
+        LP_FEE_BPS,
+        PROTOCOL_FEE_SHARE_BPS,
+        (0, 0),
+        Word::from(P2idNote::script_root()),
+    )?;
+    let component = AccountComponent::from_package(contracts.port0.as_ref().clone(), &init)
+        .context("failed to build account component from port0 package")?;
+    let mut policy = BasicConstantFeePolicy::new();
+    for root in pool_roots
+        .iter()
+        .chain(AuthNetworkAccount::default_allowed_note_scripts().iter())
+    {
+        policy = policy.with_fee(*root, AssetAmount::ZERO);
+    }
+    let fee_policy_manager = FeePolicyManager::builder()
+        .active_fee_policy(policy.into())
+        .fee_faucet_id(token0_faucet.id())
+        .build();
+    let account_builder = AccountBuilder::new([7_u8; 32])
+        .account_type(AccountType::Public)
+        .with_component(component)
+        .with_component(CodeInspection::from(CodeInspection));
+    let auth = Auth::NetworkAccount {
+        allowed_script_roots: pool_roots,
+        allowed_tx_script_roots: BTreeSet::new(),
+        fee_policy_manager,
+        sponsorship_policy: SponsorshipPolicy::default(),
+    };
+    let pool = builder
+        .add_account_from_builder(auth, account_builder, AccountState::Exists)
+        .context("failed to add the hostile pool")?
+        .id();
+
+    let register_note = build_note(
+        contracts.register_note.clone(),
+        admin.id(),
+        register_note_storage(registry, pool, token0_faucet.id(), token1_faucet.id()),
+        vec![],
+    )?;
+    builder.add_output_note(RawOutputNote::Full(register_note.clone()));
+
+    let mut mock_chain = builder.build()?;
+    let result = consume_note_with_foreign(&mut mock_chain, registry, &register_note, pool).await;
+    assert!(
+        result.is_err(),
+        "registration must fail when the pool's fee asset is not the chain's"
+    );
+    Ok(())
+}
+
+/// A pool whose payout notes would carry a script of the creator's choosing is
+/// rejected. The pool's `p2id_root` is storage, so the code commitment does not
+/// pin it, and a hostile root would run an attacker script when a recipient
+/// consumes a swap or burn payout.
+#[tokio::test]
+async fn register_rejects_a_pool_with_a_foreign_payout_script() -> Result<()> {
+    let contracts = Contracts::build()?;
+    let mut builder = MockChain::builder();
+
+    let token0_faucet =
+        builder.add_existing_basic_faucet(basic_auth(), "ALPHA", 2_000_000, Some(2_000_000))?;
+    let token1_faucet =
+        builder.add_existing_basic_faucet(basic_auth(), "BETA", 2_000_000, Some(2_000_000))?;
+    let admin = builder.add_existing_wallet(basic_auth())?;
+    let fee_to = builder.add_existing_wallet(basic_auth())?;
+
+    let token0_key = FungibleAsset::new(token0_faucet.id(), 1)?.to_id_word();
+    let token1_key = FungibleAsset::new(token1_faucet.id(), 1)?.to_id_word();
+
+    let pool_roots = pool_note_roots(&contracts)?;
+    let fixture = pool_code_commitment_network(
+        &mut builder,
+        contracts.port0.clone(),
+        token0_key,
+        token1_key,
+        admin.id(),
+        &pool_roots,
+    )?;
+    let registry = add_registry_account_network(
+        &mut builder,
+        contracts.registry.clone(),
+        fee_to.id(),
+        PROTOCOL_FEE_SHARE_BPS,
+        fixture.commitment,
+        fixture.auth_roots,
+        register_note_root(&contracts)?,
+        vec![],
+        registry_note_roots(&contracts)?,
+    )?;
+
+    // A payout script that is not the standard P2ID.
+    let hostile_root = Word::from(NoteScript::from_package(contracts.swap_note.as_ref())?.root());
+    let pool = add_pool_account_network_with_p2id(
+        &mut builder,
+        contracts.port0.clone(),
+        token0_key,
+        token1_key,
+        registry,
+        hostile_root,
+        pool_roots,
+    )?;
+
+    let register_note = build_note(
+        contracts.register_note.clone(),
+        admin.id(),
+        register_note_storage(registry, pool, token0_faucet.id(), token1_faucet.id()),
+        vec![],
+    )?;
+    builder.add_output_note(RawOutputNote::Full(register_note.clone()));
+
+    let mut mock_chain = builder.build()?;
+    let result = consume_note_with_foreign(&mut mock_chain, registry, &register_note, pool).await;
+    assert!(
+        result.is_err(),
+        "registration must fail when the pool's payout script root is not the P2ID root"
+    );
+    Ok(())
+}
+
+/// A pool that carries the accepted code but an allowlist of its own is
+/// rejected. The code commitment pins code, not storage, and a note the pool
+/// admits could drain its vault through the wallet's `move_asset_to_note`.
+#[tokio::test]
+async fn register_rejects_a_pool_with_a_foreign_allowlist() -> Result<()> {
+    let contracts = Contracts::build()?;
+    let mut builder = MockChain::builder();
+
+    let token0_faucet =
+        builder.add_existing_basic_faucet(basic_auth(), "ALPHA", 2_000_000, Some(2_000_000))?;
+    let token1_faucet =
+        builder.add_existing_basic_faucet(basic_auth(), "BETA", 2_000_000, Some(2_000_000))?;
+    let admin = builder.add_existing_wallet(basic_auth())?;
+    let fee_to = builder.add_existing_wallet(basic_auth())?;
+
+    let token0_key = FungibleAsset::new(token0_faucet.id(), 1)?.to_id_word();
+    let token1_key = FungibleAsset::new(token1_faucet.id(), 1)?.to_id_word();
+
+    let pool_roots = pool_note_roots(&contracts)?;
+    let fixture = pool_code_commitment_network(
+        &mut builder,
+        contracts.port0.clone(),
+        token0_key,
+        token1_key,
+        admin.id(),
+        &pool_roots,
+    )?;
+    let registry = add_registry_account_network(
+        &mut builder,
+        contracts.registry.clone(),
+        fee_to.id(),
+        PROTOCOL_FEE_SHARE_BPS,
+        fixture.commitment,
+        fixture.auth_roots,
+        register_note_root(&contracts)?,
+        vec![],
+        registry_note_roots(&contracts)?,
+    )?;
+
+    // The same code commitment, one extra admitted note script.
+    let mut hostile_roots = pool_roots;
+    hostile_roots.insert(note_root(&contracts.register_note)?);
+    let pool = add_pool_account_network(
+        &mut builder,
+        contracts.port0.clone(),
+        token0_key,
+        token1_key,
+        registry,
+        (0, 0),
+        vec![],
+        hostile_roots,
+    )?;
+
+    let register_note = build_note(
+        contracts.register_note.clone(),
+        admin.id(),
+        register_note_storage(registry, pool, token0_faucet.id(), token1_faucet.id()),
+        vec![],
+    )?;
+    builder.add_output_note(RawOutputNote::Full(register_note.clone()));
+
+    let mut mock_chain = builder.build()?;
+    let result = consume_note_with_foreign(&mut mock_chain, registry, &register_note, pool).await;
+    assert!(
+        result.is_err(),
+        "registration must fail when the pool's allowlist differs from the registry's"
     );
     Ok(())
 }
@@ -1803,37 +2582,47 @@ async fn register_rejects_a_second_pool_for_the_same_pair() -> Result<()> {
     let token0_key = FungibleAsset::new(token0_faucet.id(), 1)?.to_id_word();
     let token1_key = FungibleAsset::new(token1_faucet.id(), 1)?.to_id_word();
 
-    let accepted = pool_code_commitment(&mut builder, &contracts, token0_key, token1_key, admin.id())?;
-    let registry = add_registry_account(
+    let pool_roots = pool_note_roots(&contracts)?;
+    let fixture = pool_code_commitment_network(
+        &mut builder,
+        contracts.port0.clone(),
+        token0_key,
+        token1_key,
+        admin.id(),
+        &pool_roots,
+    )?;
+    let registry = add_registry_account_network(
         &mut builder,
         contracts.registry.clone(),
         fee_to.id(),
         PROTOCOL_FEE_SHARE_BPS,
-        accepted,
+        fixture.commitment,
+        fixture.auth_roots,
+        register_note_root(&contracts)?,
+        vec![],
+        registry_note_roots(&contracts)?,
     )?;
 
     // Two distinct pools, same pair.
-    let first = add_pool_account_with_registry(
+    let first = add_pool_account_network(
         &mut builder,
         contracts.port0.clone(),
         token0_key,
         token1_key,
-        admin.id(),
         registry,
-        LP_FEE_BPS,
-        PROTOCOL_FEE_SHARE_BPS,
+        (0, 0),
         vec![],
+        pool_roots.clone(),
     )?;
-    let second = add_pool_account_with_registry(
+    let second = add_pool_account_network(
         &mut builder,
         contracts.port0.clone(),
         token0_key,
         token1_key,
-        admin.id(),
         registry,
-        LP_FEE_BPS,
-        PROTOCOL_FEE_SHARE_BPS,
+        (0, 0),
         vec![],
+        pool_roots,
     )?;
 
     let first_note = build_note(
@@ -1883,6 +2672,8 @@ async fn registry_collect_pays_the_protocol() -> Result<()> {
         protocol.id(),
         PROTOCOL_FEE_SHARE_BPS,
         Word::default(),
+        zero_auth_roots(),
+        register_note_root(&contracts)?,
         vec![FungibleAsset::new(fee_faucet.id(), collected)?.into()],
     )?;
 
@@ -2304,6 +3095,8 @@ async fn collect_sweeps_stray_credits_and_third_assets() -> Result<()> {
         registry_fee_to.id(),
         PROTOCOL_FEE_SHARE_BPS,
         accepted,
+        zero_auth_roots(),
+        register_note_root(&contracts)?,
     )?;
 
     // The vault holds the reserves plus a credit in each of the three assets.
@@ -2384,5 +3177,332 @@ async fn collect_sweeps_stray_credits_and_third_assets() -> Result<()> {
     assert!(swept.contains(&(token0_faucet.id(), stray0)), "stray token0 not swept: {swept:?}");
     assert!(swept.contains(&(token1_faucet.id(), stray1)), "stray token1 not swept: {swept:?}");
     assert!(swept.contains(&(token2_faucet.id(), third)), "third asset not swept: {swept:?}");
+    Ok(())
+}
+
+/// Measures the cycles of the canonical network-account transaction consuming
+/// each port0 note root on a fee-charging chain, then prints the fee the node
+/// charges and the schedule price the `NetworkNotePricer` derives.
+#[tokio::test]
+async fn note_fee_benchmark() -> Result<()> {
+    let contracts = Contracts::build()?;
+    let mint_root = note_root(&contracts.mint_note)?;
+    let burn_root = note_root(&contracts.burn_note)?;
+    let swap_root = note_root(&contracts.swap_note)?;
+    let collect_root = note_root(&contracts.collect_note)?;
+    let register_root = note_root(&contracts.register_note)?;
+    let registry_collect_root = note_root(&contracts.registry_collect_note)?;
+    let pool_roots: BTreeSet<NoteScriptRoot> =
+        [mint_root, burn_root, swap_root, collect_root].into_iter().collect();
+    let registry_roots: BTreeSet<NoteScriptRoot> =
+        [register_root, registry_collect_root].into_iter().collect();
+
+    let fee_faucet_id: AccountId = ACCOUNT_ID_FEE_FAUCET.try_into().expect("valid fee faucet id");
+    let fee_key = FungibleAsset::new(fee_faucet_id, 1)?.to_id_word();
+
+    let mut measured: Vec<(&'static str, NoteScriptRoot, usize)> = Vec::new();
+
+    // Pool chain: mint, swap, burn, collect. The registry is a network account
+    // too, because the pool's collect reads its protocol_fee_to by foreign call.
+    let mut builder = MockChain::builder().verification_base_fee(7);
+    let token0_faucet =
+        builder.add_existing_basic_faucet(basic_auth(), "ALPHA", 2_000_000, Some(2_000_000))?;
+    let token1_faucet =
+        builder.add_existing_basic_faucet(basic_auth(), "BETA", 2_000_000, Some(2_000_000))?;
+    let mut extra_faucets = Vec::new();
+    for symbol in ["GAMMA", "DELTA", "EPSILON", "ZETA", "ETA", "THETA", "IOTA"] {
+        extra_faucets.push(builder.add_existing_basic_faucet(
+            basic_auth(),
+            symbol,
+            1_000_000,
+            Some(1_000_000),
+        )?);
+    }
+    let admin = builder.add_existing_wallet(basic_auth())?;
+    let trader = builder.add_existing_wallet_with_assets(
+        basic_auth(),
+        [FungibleAsset::new(token0_faucet.id(), 10_000)?.into()],
+    )?;
+    let trader1 = builder.add_existing_wallet_with_assets(
+        basic_auth(),
+        [FungibleAsset::new(token1_faucet.id(), 10_000)?.into()],
+    )?;
+    let token0_key = FungibleAsset::new(token0_faucet.id(), 1)?.to_id_word();
+    let token1_key = FungibleAsset::new(token1_faucet.id(), 1)?.to_id_word();
+
+    let fixture = pool_code_commitment_network(
+        &mut builder,
+        contracts.port0.clone(),
+        token0_key,
+        token1_key,
+        admin.id(),
+        &pool_roots,
+    )?;
+    let registry = add_registry_account_network(
+        &mut builder,
+        contracts.registry.clone(),
+        admin.id(),
+        PROTOCOL_FEE_SHARE_BPS,
+        fixture.commitment,
+        zero_auth_roots(),
+        register_note_root(&contracts)?,
+        vec![],
+        registry_roots.clone(),
+    )?;
+    let mut pool_seed: Vec<Asset> = vec![FungibleAsset::new(fee_faucet_id, 1_000_000)?.into()];
+    for faucet in extra_faucets.iter().take(6) {
+        pool_seed.push(FungibleAsset::new(faucet.id(), 10)?.into());
+    }
+    let pool = add_pool_account_network(
+        &mut builder,
+        contracts.port0.clone(),
+        token0_key,
+        token1_key,
+        registry,
+        (0, 0),
+        pool_seed,
+        pool_roots.clone(),
+    )?;
+    let lp = builder.add_existing_wallet_with_assets(
+        basic_auth(),
+        [
+            FungibleAsset::new(token0_faucet.id(), 1_000_000)?.into(),
+            FungibleAsset::new(token1_faucet.id(), 1_000_000)?.into(),
+            FungibleAsset::new(pool, 100_000)?.into(),
+        ],
+    )?;
+
+    let mut mint_storage = pool_note_prefix(pool, lp.id(), serial_num(), Felt::ZERO);
+    mint_storage.push(Felt::ZERO); // min_lp_out
+    let mint_note = build_note(
+        contracts.mint_note.clone(),
+        lp.id(),
+        mint_storage,
+        vec![
+            FungibleAsset::new(token0_faucet.id(), 1_000_000)?.into(),
+            FungibleAsset::new(token1_faucet.id(), 1_000_000)?.into(),
+        ],
+    )?;
+    builder.add_output_note(RawOutputNote::Full(mint_note.clone()));
+
+    let second_serial =
+        Word::from([Felt::from(3_u8), Felt::from(1_u8), Felt::from(4_u8), Felt::from(1_u8)]);
+    let mut mint2_storage = pool_note_prefix(pool, lp.id(), second_serial, Felt::ZERO);
+    mint2_storage.push(Felt::ZERO); // min_lp_out
+    let mint2_note = build_note(
+        contracts.mint_note.clone(),
+        lp.id(),
+        mint2_storage,
+        vec![
+            FungibleAsset::new(token0_faucet.id(), 10_000)?.into(),
+            FungibleAsset::new(token1_faucet.id(), 10_000)?.into(),
+        ],
+    )?;
+    builder.add_output_note(RawOutputNote::Full(mint2_note.clone()));
+
+    let mut swap_storage = pool_note_prefix(pool, trader.id(), serial_num(), Felt::ZERO);
+    swap_storage.push(Felt::ZERO); // min_amount_out
+    let swap_note = build_note(
+        contracts.swap_note.clone(),
+        trader.id(),
+        swap_storage,
+        vec![FungibleAsset::new(token0_faucet.id(), 10_000)?.into()],
+    )?;
+    builder.add_output_note(RawOutputNote::Full(swap_note.clone()));
+
+    let mut swap2_storage = pool_note_prefix(pool, trader1.id(), second_serial, Felt::ZERO);
+    swap2_storage.push(Felt::ZERO); // min_amount_out
+    let swap2_note = build_note(
+        contracts.swap_note.clone(),
+        trader1.id(),
+        swap2_storage,
+        vec![FungibleAsset::new(token1_faucet.id(), 10_000)?.into()],
+    )?;
+    builder.add_output_note(RawOutputNote::Full(swap2_note.clone()));
+
+    let burn_serial =
+        Word::from([Felt::from(9_u8), Felt::from(8_u8), Felt::from(7_u8), Felt::from(6_u8)]);
+    let mut burn_storage = pool_note_prefix(pool, lp.id(), burn_serial, Felt::ZERO);
+    burn_storage.push(Felt::ZERO); // min_amount0
+    burn_storage.push(Felt::ZERO); // min_amount1
+    let burn_note = build_note(
+        contracts.burn_note.clone(),
+        lp.id(),
+        burn_storage,
+        vec![FungibleAsset::new(pool, 100_000)?.into()],
+    )?;
+    builder.add_output_note(RawOutputNote::Full(burn_note.clone()));
+
+    let serial = serial_num();
+    let mut collect_storage = account_id_felts(pool).to_vec();
+    collect_storage.extend([serial[0], serial[1], serial[2], serial[3]]);
+    let mut collect_keys = vec![token0_key, token1_key];
+    for faucet in extra_faucets.iter().take(2) {
+        collect_keys.push(FungibleAsset::new(faucet.id(), 1)?.to_id_word());
+    }
+    for key in collect_keys {
+        collect_storage.extend([key[0], key[1], key[2], key[3]]);
+    }
+    let collect_note =
+        build_note(contracts.collect_note.clone(), admin.id(), collect_storage, vec![])?;
+    builder.add_output_note(RawOutputNote::Full(collect_note.clone()));
+
+    let mut chain = builder.build()?;
+    measured.push(("pool mint", mint_root, bench_consume(&mut chain, pool, &mint_note, None).await?));
+    measured.push(("pool mint 2", mint_root, bench_consume(&mut chain, pool, &mint2_note, None).await?));
+    measured.push(("pool swap", swap_root, bench_consume(&mut chain, pool, &swap_note, None).await?));
+    measured.push(("pool swap 2", swap_root, bench_consume(&mut chain, pool, &swap2_note, None).await?));
+    measured.push(("pool burn", burn_root, bench_consume(&mut chain, pool, &burn_note, None).await?));
+    measured.push((
+        "pool collect",
+        collect_root,
+        bench_consume(&mut chain, pool, &collect_note, Some(registry)).await?,
+    ));
+
+    // Registry chain: register, registry collect. The register note's script reads
+    // the pool by foreign call.
+    let mut builder = MockChain::builder().verification_base_fee(7);
+    let token0_faucet =
+        builder.add_existing_basic_faucet(basic_auth(), "ALPHA", 2_000_000, Some(2_000_000))?;
+    let token1_faucet =
+        builder.add_existing_basic_faucet(basic_auth(), "BETA", 2_000_000, Some(2_000_000))?;
+    let mut extra_faucets = Vec::new();
+    for symbol in ["GAMMA", "DELTA", "EPSILON", "ZETA", "ETA", "THETA", "IOTA"] {
+        extra_faucets.push(builder.add_existing_basic_faucet(
+            basic_auth(),
+            symbol,
+            1_000_000,
+            Some(1_000_000),
+        )?);
+    }
+    let admin = builder.add_existing_wallet(basic_auth())?;
+    let token0_key = FungibleAsset::new(token0_faucet.id(), 1)?.to_id_word();
+    let token1_key = FungibleAsset::new(token1_faucet.id(), 1)?.to_id_word();
+
+    let fixture = pool_code_commitment_network(
+        &mut builder,
+        contracts.port0.clone(),
+        token0_key,
+        token1_key,
+        admin.id(),
+        &pool_roots,
+    )?;
+    let mut registry_seed: Vec<Asset> = vec![FungibleAsset::new(fee_faucet_id, 100_000)?.into()];
+    for faucet in &extra_faucets {
+        registry_seed.push(FungibleAsset::new(faucet.id(), 10)?.into());
+    }
+    let registry = add_registry_account_network(
+        &mut builder,
+        contracts.registry.clone(),
+        admin.id(),
+        PROTOCOL_FEE_SHARE_BPS,
+        fixture.commitment,
+        fixture.auth_roots,
+        register_note_root(&contracts)?,
+        registry_seed,
+        registry_roots.clone(),
+    )?;
+    let pool = add_pool_account_network(
+        &mut builder,
+        contracts.port0.clone(),
+        token0_key,
+        token1_key,
+        registry,
+        (0, 0),
+        vec![],
+        pool_roots.clone(),
+    )?;
+
+    let register_note = build_note(
+        contracts.register_note.clone(),
+        admin.id(),
+        register_note_storage(registry, pool, token0_faucet.id(), token1_faucet.id()),
+        vec![],
+    )?;
+    builder.add_output_note(RawOutputNote::Full(register_note.clone()));
+
+    let serial = serial_num();
+    let mut registry_collect_storage = account_id_felts(registry).to_vec();
+    registry_collect_storage.extend([serial[0], serial[1], serial[2], serial[3]]);
+    registry_collect_storage.extend([fee_key[0], fee_key[1], fee_key[2], fee_key[3]]);
+    // Four keys including the fee asset: the shape the sweep tooling sends, so
+    // the registry's hold is measured on the path it will actually take.
+    for faucet in extra_faucets.iter().take(3) {
+        let key = FungibleAsset::new(faucet.id(), 1)?.to_id_word();
+        registry_collect_storage.extend([key[0], key[1], key[2], key[3]]);
+    }
+    let registry_collect_note = build_note(
+        contracts.registry_collect_note.clone(),
+        admin.id(),
+        registry_collect_storage,
+        vec![],
+    )?;
+    builder.add_output_note(RawOutputNote::Full(registry_collect_note.clone()));
+
+    let mut chain = builder.build()?;
+    measured.push((
+        "registry register",
+        register_root,
+        bench_consume(&mut chain, registry, &register_note, Some(pool)).await?,
+    ));
+    measured.push((
+        "registry collect",
+        registry_collect_root,
+        bench_consume(&mut chain, registry, &registry_collect_note, None).await?,
+    ));
+
+    // The schedule to install: fee from the kernel formula, price from the
+    // pricer's default one-verification-cycle margin.
+    // Per root, the maximum across the measured paths: the schedule must cover
+    // the most expensive path.
+    let mut max_cycles: BTreeMap<NoteScriptRoot, usize> = BTreeMap::new();
+    for (_, root, cycles) in &measured {
+        max_cycles
+            .entry(*root)
+            .and_modify(|current| *current = (*current).max(*cycles))
+            .or_insert(*cycles);
+    }
+
+    let pricer = {
+        let mut pricer_builder = NetworkNotePricer::builder()
+            .fee_parameters(FeeParameters::new(7))
+            .fee_asset_id(AssetId::new_fungible(fee_faucet_id));
+        for (root, cycles) in &max_cycles {
+            pricer_builder =
+                pricer_builder.note_cost(*root, NoteCost::new(*cycles as u32, Vec::new()));
+        }
+        pricer_builder.build()
+    };
+
+    for (name, root, cycles) in &measured {
+        let fee = kernel_fee(*cycles as u32);
+        // `collect` reserves this fee out of the fee asset before paying out, so the
+        // reservation must cover each measured collect path. The constants are
+        // `COLLECT_FEE_HOLD` in `contracts/port0` (119) and `contracts/pool-registry` (112).
+        let hold = if name.starts_with("pool collect") {
+            POOL_COLLECT_FEE_HOLD
+        } else if name.starts_with("registry collect") {
+            REGISTRY_COLLECT_FEE_HOLD
+        } else {
+            0
+        };
+        if hold > 0 {
+            assert!(
+                fee <= hold,
+                "{name}: measured fee {fee} exceeds the contract's collect hold {hold}"
+            );
+        }
+        println!("{name} root={} cycles={cycles} fee={fee}", Word::from(*root).to_hex());
+    }
+    println!("schedule (max path per root):");
+    for (root, cycles) in &max_cycles {
+        let fee = kernel_fee(*cycles as u32);
+        let price = pricer.price(*root)?;
+        println!(
+            "  root={} cycles={cycles} fee={fee} price={}",
+            Word::from(*root).to_hex(),
+            price.as_u64(),
+        );
+    }
     Ok(())
 }

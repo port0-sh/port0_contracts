@@ -9,10 +9,10 @@ pub mod error;
 pub mod utils;
 
 use miden::{
-    AccountId, Asset, AssetId, Felt, NoteIdx, NoteType, StorageValue, Tag, Word, active_account,
-    active_note, component, component_storage, export_type, faucet,
+    AccountId, Asset, AssetId, Felt, NoteIdx, NoteType, StorageSlotId, StorageValue, Tag, Word,
+    active_account, active_note, component, component_storage, export_type, faucet, input_note,
     native_account::{self, NativeAccount},
-    note, output_note, tx,
+    note, output_note, storage, tx,
 };
 
 use crate::{
@@ -29,8 +29,9 @@ use crate::{
 /// The pool's identity, as the registry sees it before listing the pool.
 ///
 /// Field order is the order the values occupy when the procedure returns, which
-/// is what a foreign caller reads: the registry decodes twelve felts as
-/// `[prefix, suffix, token0[0..4], token1[0..4], protocol_fee_share_bps, lp_fee_bps]`.
+/// is what a foreign caller reads: the registry decodes sixteen felts as
+/// `[prefix, suffix, token0[0..4], token1[0..4], protocol_fee_share_bps,
+/// lp_fee_bps, p2id_root[0..4]]`.
 #[export_type]
 pub struct PoolIdentity {
     pub registry_id: AccountId,
@@ -38,6 +39,11 @@ pub struct PoolIdentity {
     pub token1_key: Word,
     pub protocol_fee_share_bps: u32,
     pub lp_fee_bps: u32,
+    /// Script root of every payout note the pool creates. It is pool storage,
+    /// so the code commitment does not pin it; the registry compares it against
+    /// its own P2ID root, because a hostile root would let a payout note run an
+    /// attacker script when the recipient consumes it.
+    pub p2id_root: Word,
 }
 
 #[component_storage]
@@ -72,22 +78,19 @@ struct Port0Storage {
 /// pool reads the protocol's fee destination from the registry over foreign
 /// procedure invocation, so the registry holds that address once for every
 /// pool instead of each pool storing its own copy.
-/// Cycles added to the transaction's current cycle count when a collect procedure reserves the
-/// fee it will owe at the epilogue.
-///
-/// `tx::compute_fee` is the kernel's own fee procedure, the same formula the epilogue charges; the
-/// only input is the work still ahead. `MAX_CYCLES` is `2^29`, so `2^28` leaves any collect
-/// transaction (well below `2^28` cycles) with a reserve of `base_fee * 29`, which is at least the
-/// fee of any transaction under `2^28` cycles. Over-reserving is safe: the surplus stays in the
-/// vault and the next collect sweeps it.
-const COLLECT_EXTRA_CYCLES: u32 = 1 << 28;
+// The reserve `collect` leaves for the transaction's own epilogue charge. The
+// value and its measurement live in `contracts/collect-fee-hold.rs`, which the
+// benchmark and the SDK read too.
+include!("../../collect-fee-hold.rs");
+
+const COLLECT_FEE_HOLD: u64 = POOL_COLLECT_FEE_HOLD;
 
 fn registry_protocol_fee_to_root() -> Word {
     Word::new([
-        Felt::new_unchecked(15483598750818023257),
-        Felt::new_unchecked(336910118429041028),
-        Felt::new_unchecked(12277962169024785536),
-        Felt::new_unchecked(13342452442204916062),
+        Felt::new_unchecked(3698802784612984771),
+        Felt::new_unchecked(5046112243721512670),
+        Felt::new_unchecked(199680794832819392),
+        Felt::new_unchecked(6518237574809245526),
     ])
 }
 
@@ -123,6 +126,96 @@ trait Port0: NativeAccount {
     /// The pool's registry, token keys, and fee rates, for registration checks.
     #[account_procedure]
     fn get_registry_identity(&self) -> PoolIdentity;
+    /// The roots of the pool's auth component storage: the two note allowlists
+    /// and the fee schedule. The registry compares them against the values it
+    /// was created with, because the code commitment pins code, not storage,
+    /// and a pool whose allowlist admits a foreign note could be drained
+    /// through the wallet's `move_asset_to_note`.
+    #[account_procedure]
+    fn get_auth_identity(&self) -> AuthIdentity;
+    /// The fee asset and policy roots, which the registry pins alongside the
+    /// allowlists.
+    #[account_procedure]
+    fn get_fee_identity(&self) -> FeeIdentity;
+}
+
+/// Storage roots of the pool's auth component, as the registry reads them.
+///
+/// Slot ids are hashes of the slot names, so they are constants here, printed
+/// by `cargo run -p integration --bin auth_slot_ids --release`.
+fn note_allowlist_slot() -> StorageSlotId {
+    StorageSlotId::new(
+        Felt::new_unchecked(2126136152909143842),
+        Felt::new_unchecked(17348658509170012731),
+    )
+}
+
+fn tx_script_allowlist_slot() -> StorageSlotId {
+    StorageSlotId::new(
+        Felt::new_unchecked(16532382515097106655),
+        Felt::new_unchecked(483692671984754967),
+    )
+}
+
+fn fee_schedule_slot() -> StorageSlotId {
+    StorageSlotId::new(
+        Felt::new_unchecked(11414504603391865159),
+        Felt::new_unchecked(11788117098168477216),
+    )
+}
+
+fn fee_asset_id_slot() -> StorageSlotId {
+    StorageSlotId::new(
+        Felt::new_unchecked(17901680388429698621),
+        Felt::new_unchecked(17192973516514571175),
+    )
+}
+
+fn active_fee_policy_slot() -> StorageSlotId {
+    StorageSlotId::new(
+        Felt::new_unchecked(790240041889825826),
+        Felt::new_unchecked(9722722963538360747),
+    )
+}
+
+fn allowed_fee_policy_roots_slot() -> StorageSlotId {
+    StorageSlotId::new(
+        Felt::new_unchecked(3943427639198219983),
+        Felt::new_unchecked(15317049099349892199),
+    )
+}
+
+/// Script root of the standard `FeeSponsorshipNote` (`miden-standards` 0.17.1),
+/// printed by `cargo run -p integration --bin standards_roots --release`.
+fn fee_sponsorship_root() -> Word {
+    Word::new([
+        Felt::new_unchecked(7114780785082128985),
+        Felt::new_unchecked(9259821602576497412),
+        Felt::new_unchecked(14559693444984352863),
+        Felt::new_unchecked(6654559152995977220),
+    ])
+}
+
+/// The roots of the pool's allowlist storage, in the order `get_auth_identity`
+/// returns them. The code commitment pins code, not storage, so a pool creator
+/// chooses these; unpinned, a hostile allowlist admits a draining note.
+#[export_type]
+pub struct AuthIdentity {
+    pub note_allowlist_root: Word,
+    pub tx_script_allowlist_root: Word,
+    pub fee_schedule_root: Word,
+}
+
+/// The pool's fee-manager storage, in the order `get_fee_identity` returns it.
+///
+/// Split from `AuthIdentity` because a procedure cannot return six words on the
+/// stack. Unpinned, a hostile fee asset or policy makes the pool's notes
+/// unconsumable while the pool still looks ordinary in a listing.
+#[export_type]
+pub struct FeeIdentity {
+    pub fee_asset_id: Word,
+    pub active_fee_policy_root: Word,
+    pub allowed_fee_policy_roots: Word,
 }
 
 impl Port0Storage {
@@ -144,6 +237,31 @@ impl Port0Storage {
             Felt::new_unchecked(id.suffix.as_canonical_u64() | 0x11),
             id.prefix,
         ])
+    }
+
+    /// How much of the fee asset `collect` must leave in the vault for the
+    /// transaction's own epilogue charge.
+    ///
+    /// When the transaction carries a fee-sponsorship note, that note pays the
+    /// kernel fee, so nothing has to be reserved and the sweep returns the whole
+    /// balance, including whatever an earlier collect reserved. Without one the
+    /// measured fee is reserved, because the payout note is created before the
+    /// fee is settled. A sponsorship note that pays nothing makes the caller's
+    /// own collect abort at the epilogue: their transaction, no reserves touched.
+    fn collect_fee_hold(&self) -> u64 {
+        let sponsorship = fee_sponsorship_root();
+        let mut index = 0;
+        let count = tx::get_num_input_notes();
+        while index < count {
+            let note_index = NoteIdx {
+                inner: Felt::new_unchecked(index as u64),
+            };
+            if input_note::get_script_root(note_index).eq(&sponsorship) {
+                return 0;
+            }
+            index += 1;
+        }
+        COLLECT_FEE_HOLD
     }
 
     fn add_asset_to_output_note(&mut self, asset: Asset, note_idx: NoteIdx) {
@@ -454,6 +572,24 @@ impl Port0 for Port0Storage {
             reserve1: reserve1_after,
         });
     }
+    fn get_auth_identity(&self) -> AuthIdentity {
+        // The active account is the pool, so these read its own auth component
+        // storage. A map slot's item is its Merkle root.
+        AuthIdentity {
+            note_allowlist_root: storage::get_item(note_allowlist_slot()),
+            tx_script_allowlist_root: storage::get_item(tx_script_allowlist_slot()),
+            fee_schedule_root: storage::get_item(fee_schedule_slot()),
+        }
+    }
+
+    fn get_fee_identity(&self) -> FeeIdentity {
+        FeeIdentity {
+            fee_asset_id: storage::get_item(fee_asset_id_slot()),
+            active_fee_policy_root: storage::get_item(active_fee_policy_slot()),
+            allowed_fee_policy_roots: storage::get_item(allowed_fee_policy_roots_slot()),
+        }
+    }
+
     fn get_registry_identity(&self) -> PoolIdentity {
         let fees = self.get_fees();
         PoolIdentity {
@@ -462,6 +598,7 @@ impl Port0 for Port0Storage {
             token1_key: self.token1_asset_key.get(),
             protocol_fee_share_bps: fees.protocol_fee_share_bps,
             lp_fee_bps: fees.lp_fee_bps,
+            p2id_root: self.p2id_root.get(),
         }
     }
 
@@ -479,11 +616,7 @@ impl Port0 for Port0Storage {
         let (token0_asset_key, token1_asset_key) =
             (self.token0_asset_key(), self.token1_asset_key());
         let is_fee_asset = asset_key.eq(&Word::from(tx::get_fee_asset_id()));
-        let fee_hold = if is_fee_asset {
-            tx::compute_fee(COLLECT_EXTRA_CYCLES, Word::default()).as_u64()
-        } else {
-            0
-        };
+        let fee_hold = if is_fee_asset { self.collect_fee_hold() } else { 0 };
         let balance = active_account::get_asset(AssetId::from(asset_key))[0].as_canonical_u64();
         let reserves = self.reserves.get();
         let reserved = if asset_key.eq(&token0_asset_key) {

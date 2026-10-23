@@ -1,11 +1,11 @@
 [package]
 name = "burn_note"
-version = "0.1.0"
+version = "0.3.0"
 
 [lib]
 path = "src/lib.rs"
 kind = "note"
-namespace = "miden:burn-note/miden-burn-note@0.1.0"
+namespace = "miden:burn-note/miden-burn-note@0.3.0"
 
 [dependencies]
 miden-core = "0.35"

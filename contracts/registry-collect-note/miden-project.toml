@@ -1,11 +1,11 @@
 [package]
 name = "registry_collect_note"
-version = "0.1.0"
+version = "0.3.0"
 
 [lib]
 path = "src/lib.rs"
 kind = "note"
-namespace = "miden:registry-collect-note/miden-registry-collect-note@0.1.0"
+namespace = "miden:registry-collect-note/miden-registry-collect-note@0.3.0"
 
 [dependencies]
 miden-core = "0.35"

@@ -1,11 +1,11 @@
 [package]
 name = "swap_note"
-version = "0.1.0"
+version = "0.3.0"
 
 [lib]
 path = "src/lib.rs"
 kind = "note"
-namespace = "miden:swap-note/miden-swap-note@0.1.0"
+namespace = "miden:swap-note/miden-swap-note@0.3.0"
 
 [dependencies]
 miden-core = "0.35"
