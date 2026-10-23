@@ -12,13 +12,15 @@ protocol account the registry designates.
 
 ## Components
 
-Nine contracts compose the system.
+Eleven contracts compose the system.
 
 - `port0`: the pool account component. Holds the reserves accounting, the
   LP supply, the fee rates, the protocol pot, and the price oracle.
 - `pool-registry`: the registry account component. Holds the accepted pool code
   commitments, the registered pools, the ordered asset pair index, the protocol
   fee policy, and the pool storage roots it pins at registration.
+- `network-faucet`: the fixed-supply token faucet component. Holds an immutable
+  owner and a launch flag, and mints the whole supply once.
 - `mint-note`: note script for adding liquidity.
 - `burn-note`: note script for removing liquidity.
 - `swap-note`: note script for trading.
@@ -27,6 +29,7 @@ Nine contracts compose the system.
 - `registry-collect-note`: note script for withdrawing the registry's register
   fees.
 - `registry-config-note`: note script for changing the register fee, admin only.
+- `launch-note`: note script for minting a network faucet's whole supply, once.
 
 The pool component exposes `token0_asset_key`, `token1_asset_key`, `lp_supply`,
 `get_reserves`, `get_fees`, `mint`, `burn`, `swap`, `quote_swap`, `collect`,
@@ -239,6 +242,40 @@ zero reserve returns before updating the accumulators.
 The LP token is a fungible asset issued by the pool account. No separate faucet
 account exists.
 
+A launched token is different: its issuer is a separate account, the network
+faucet.
+
+## Network faucet
+
+A launched token is a fixed-supply token whose faucet is a network account. A
+regular faucet is keyed, and a gated network requires an allowlist entry before
+its first transaction; a network account is exempt, so launching a token needs no
+invitation.
+
+The faucet account carries three components: `network-faucet`, the standard basic
+fungible faucet (`miden::standards::components::faucets::fungible_faucet`), and
+the network auth. The standard component supplies the name, symbol, decimals, and
+maximum supply a wallet reads, and is what makes the account recognizable as a
+faucet. The auth allowlists the launch note and prices it; the launch price is
+the measured schedule entry.
+
+| Slot | Type | Encoding |
+|------|------|----------|
+| `owner` | Word | `[0, 0, suffix, prefix]` of the account allowed to launch |
+| `launched` | Felt | `[flag, 0, 0, 0]`, `1` after the supply is minted |
+
+`launch(recipient, serial_num, tag)` requires the launch note's sender to equal
+`owner` and `launched` to be zero. It reads the maximum supply from the standard
+component's `token_config` slot, mints that amount, pays it to `recipient` as a
+P2ID note, and writes the supply back into `token_config` so the faucet reports
+what it minted. The standard component's own minting procedure is unreachable
+because the account installs no mint policy, and that procedure aborts without
+one. A launch is one-way: there is no second mint, no owner rotation, and no
+supply change.
+
+A faucet has no sweep. The launch sponsorship carries the pricer's one-cycle
+margin, and that margin stays in the faucet as its only balance.
+
 ## Numeric bounds
 
 Amounts, reserves, and `lp_supply` are u64 values bounded by `MAX_AMOUNT = 2^57`.
@@ -301,6 +338,12 @@ Registry `set_register_fee`:
 - new fee is zero
 - script root differs from `register_note_root`
 - the script root has no schedule entry with its set marker
+
+Network faucet `launch`:
+
+- note sender differs from `owner`
+- `launched` is already `1`
+- the configured maximum supply is zero
 
 ## Indexing
 

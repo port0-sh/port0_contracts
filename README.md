@@ -12,6 +12,7 @@ the other. A protocol fee accrues to the registry's protocol account.
 |----------|------|---------|
 | `port0` | account component | Pool: reserves, LP supply, fee accounting, oracle |
 | `pool-registry` | account component | Accepted pool code commitments, pool set, asset pair index, protocol fee policy, admin register fee |
+| `network-faucet` | account component | Fixed-supply token faucet: immutable owner, one launch, supply accounting |
 | `mint-note` | note script | Add liquidity |
 | `burn-note` | note script | Remove liquidity |
 | `swap-note` | note script | Trade |
@@ -19,6 +20,7 @@ the other. A protocol fee accrues to the registry's protocol account.
 | `register-note` | note script | Register a pool in the registry |
 | `registry-collect-note` | note script | Move the registry's whole balance to the protocol account |
 | `registry-config-note` | note script | Change the registry's register fee, admin only |
+| `launch-note` | note script | Mint a network faucet's whole supply to a recipient, once |
 
 A deployed pool account carries four components: `port0`, the standard basic
 fungible faucet component (the LP token's name, symbol, and decimals, so wallets
@@ -30,6 +32,25 @@ can render it), the standard `CodeInspection` component (the registry reads
 A pool is a public network account. An operation is a network note sent to the
 pool; the node's transaction builder consumes it and runs the pool procedure.
 Registration is a network note sent to the registry.
+
+## Network faucet
+
+A launched token is a fixed-supply token whose faucet is itself a network
+account. A regular faucet is keyed, and a gated network requires an allowlist
+entry before its first transaction; a network account is exempt, so launching a
+token needs no invitation.
+
+The faucet account carries the `network-faucet` component, the standard basic
+fungible faucet component (name, symbol, decimals, and the maximum supply), and
+the network auth. Its component stores the immutable `owner` and a `launched`
+flag; the standard faucet's own minting procedure is unreachable because the
+account installs no mint policy.
+
+`launch(recipient, serial_num, tag)` mints the whole maximum supply once and pays
+it to `recipient` as a P2ID note. It requires the launch note's sender to equal
+the owner and the `launched` flag to be zero. The supply is read from the faucet
+configuration and written back as the token supply, so the faucet reports what it
+minted.
 
 ## Concepts
 
@@ -53,6 +74,8 @@ Registration is a network note sent to the registry.
     against the registry. Both are permissionless.
   - Registry admin emits the registry-config note, which changes the register
     fee and nothing else.
+  - Token owner emits the launch note, which mints the faucet's whole supply
+    once.
 
 ## Usage
 
@@ -84,6 +107,7 @@ note storage.
 | register-note | none | registry id (2), pool id (2), asset0 (2), asset1 (2) |
 | registry-collect-note | none | registry id (2), serial (4), then one asset key (4) per swept asset |
 | registry-config-note | none | registry id (2), new register fee (1), register note script root (4) |
+| launch-note | none | faucet id (2), recipient (2), serial (4), tag (1) |
 
 Account ids are two felts, prefix then suffix. `deadline` is a block timestamp;
 the note reverts if the pool executes it after that time. The `min_*` fields
@@ -124,20 +148,28 @@ transaction carries a sponsorship note.
 Registers the pool in the registry. The note targets the registry account and
 carries the registry id, the pool id, and the two token faucet ids in note
 storage. The registry's `register` procedure calls the pool's
-`CodeInspection::get_code_commitment` and `get_registry_identity` by foreign
-procedure invocation. It rejects a commitment that is not accepted, a pool id
-or asset pair that is already registered, a pool that points at a different
-registry, a pool whose token keys do not match the claimed pair, a pool whose
-protocol fee rate differs from the registry's, and a pool whose LP fee is not
-an allowed tier.
+`CodeInspection::get_code_commitment`, `get_registry_identity`,
+`get_auth_identity`, and `get_fee_identity` by foreign procedure invocation. It
+rejects a commitment that is not accepted, a pool id or asset pair that is
+already registered, a pool that points at a different registry, a pool whose
+token keys do not match the claimed pair, a pool whose protocol fee rate differs
+from the registry's, a pool whose LP fee is not an allowed tier, a payout root
+that differs from the registry's P2ID root, and a pool whose auth or fee storage
+roots differ from the values the registry was created with.
 
 ### registry-collect-note
 
 Moves the registry's whole balance of each named asset to the protocol account.
 The note carries the registry id, a serial, and one four-felt asset key per
-swept asset. Like a pool collect, it is permissionless and the destination is
-fixed in storage. The registry leaves the transaction's own fee in its vault
-when the swept key is the fee asset.
+swept asset, at most four. Like a pool collect, it is permissionless and the
+destination is fixed in storage.
+
+### launch-note
+
+Targets a network faucet and calls its `launch`, which mints the faucet's whole
+maximum supply once to the recipient named in note storage. The faucet checks
+the note's sender against its immutable owner, so a launch note from any other
+account aborts. The note carries no assets.
 
 ## Quoting a swap
 
@@ -185,6 +217,8 @@ contracts/
   register-note/            pool registration note script
   registry-collect-note/    registry fee collection note script
   registry-config-note/     register fee configuration note script
+  network-faucet/           fixed-supply token faucet component
+  launch-note/              network faucet launch note script
 integration/                MockChain integration tests and deployment binaries
 ```
 
