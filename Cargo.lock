@@ -2550,9 +2550,9 @@ dependencies = [
 
 [[package]]
 name = "miden-client"
-version = "0.17.1"
+version = "0.17.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b2c750011375ee29cc9f98d784395a5883eb2daaa615c49b869ed74ded407397"
+checksum = "a15e3ac7be77423651c7ba329e73aed1debe56e982cb82520641c4e8d0f886ac"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -2569,6 +2569,7 @@ dependencies = [
  "miden-standards",
  "miden-tx",
  "miden-tx-batch",
+ "miden-usdcx",
  "miette",
  "prost",
  "prost-types",
@@ -2604,9 +2605,9 @@ dependencies = [
 
 [[package]]
 name = "miden-client-sqlite-store"
-version = "0.17.1"
+version = "0.17.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "707b7b9d82469518570c07b25aefb90233c710015a62f9097daf52d8c6c9656d"
+checksum = "48ca5b8ccc1f06159e65f25e519f382233eda5774047b72af2d324af8145866d"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -2899,9 +2900,9 @@ dependencies = [
 
 [[package]]
 name = "miden-node-proto-build"
-version = "0.17.2"
+version = "0.17.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f418ff5ca14a05711fe02a86809e80f78ec03b983158e7de97489021ba55856b"
+checksum = "eaaeaddbb15256128bda160122e17a457a902a93575fce693ebe15ba2c93d648"
 dependencies = [
  "build-rs",
  "codegen",
@@ -3278,6 +3279,24 @@ dependencies = [
  "miden-field",
  "miden-field-repr",
  "miden-stdlib-sys",
+]
+
+[[package]]
+name = "miden-usdcx"
+version = "0.17.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "cf4aa588e0224fd03ed6cc9837f7c4f0384eba222416816f53892d4f535ae72e"
+dependencies = [
+ "bon",
+ "miden-assembly",
+ "miden-core-lib",
+ "miden-package-registry",
+ "miden-protocol",
+ "miden-protocol-build-utils",
+ "miden-standards",
+ "miden-tx",
+ "serde",
+ "serde_json",
 ]
 
 [[package]]
