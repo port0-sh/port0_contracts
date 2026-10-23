@@ -1,19 +1,13 @@
 //! Pool registry account component.
 //!
-//! Holds the canonical set of XYK pools. A pool is registered by a register
-//! note consumed by this account. Registration verifies the pool's code
-//! commitment by foreign procedure invocation against the pool's
-//! `CodeInspection::get_code_commitment` procedure, then records the pool and
-//! its ordered asset pair.
+//! `register` verifies a pool's code commitment and identity by foreign procedure
+//! invocation, then records the pool and its ordered asset pair. Storage maps:
+//! `accepted_code_commitments` (commitment -> 1), `pools` (pool id key ->
+//! commitment), `assets_to_pool` (ordered pair key -> pool id key).
 //!
-//! Storage:
-//! - `accepted_code_commitments`: pool code commitment -> 1 if accepted.
-//! - `pools`: pool id key -> pool code commitment.
-//! - `assets_to_pool`: ordered asset pair -> pool id key.
-//!
-//! Keys are four-felt words. A pool id key is `[prefix, suffix, 0, 0]`; an
-//! ordered asset pair is `[lo.prefix, lo.suffix, hi.prefix, hi.suffix]` with the
-//! pair ordered by `(prefix, suffix)` as canonical integers.
+//! Keys are four-felt words: a pool id key is `[prefix, suffix, 0, 0]`, an ordered
+//! pair key is `[lo.prefix, lo.suffix, hi.prefix, hi.suffix]` ordered by
+//! `(prefix, suffix)`.
 
 #![no_std]
 #![feature(alloc_error_handler)]

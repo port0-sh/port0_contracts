@@ -1,17 +1,11 @@
 //! Pool collect note script.
 //!
-//! Consumed by an XYK pool. Note storage, in order:
+//! Note storage: `[pool_prefix, pool_suffix, serial_0..3, asset_key_0..n]`, four
+//! felts per key, at most four keys.
 //!
-//! ```text
-//! [pool_prefix, pool_suffix,
-//!  serial_0, serial_1, serial_2, serial_3,
-//!  asset_key_0 (4 felts), asset_key_1 (4 felts), ...]
-//! ```
-//!
-//! The script asserts the executing account is the pool named in storage, then calls the pool's
-//! `collect` once per asset key. Collection is permissionless: the destination is the registry's
-//! configured protocol account, so a caller can only flush value toward it. The vault is read
-//! for each key, so the keys must name assets the pool actually holds.
+//! Asserts the executing account is the pool named in storage, then calls
+//! `collect` once per key. Collection is permissionless: the destination is the
+//! registry's configured protocol account.
 
 #![no_std]
 #![feature(alloc_error_handler)]

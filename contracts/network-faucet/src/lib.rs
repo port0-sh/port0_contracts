@@ -1,20 +1,14 @@
 //! Network faucet: a fixed-supply token whose faucet is a network account.
 //!
-//! A regular faucet is a keyed account, and on a network that gates keyed
-//! accounts its first transaction needs an invitation code. A network account is
-//! exempt, so building the faucet as one removes that requirement: launching a
-//! token costs its creator nothing but the note fees.
+//! A network account is exempt from a keyed-account allowlist, so launching a
+//! token needs no invitation code. The account carries three components: this one
+//! (owner and launch flag), the standard basic fungible faucet (name, symbol,
+//! decimals, and the procedure roots a wallet recognizes), and the network auth
+//! (the launch note allowlisted and priced).
 //!
-//! The account carries three components: this one, which owns the launch and the
-//! supply accounting; the standard basic fungible faucet, which supplies the
-//! name, symbol, and decimals a wallet reads and is what makes the account
-//! recognizable as a faucet; and the network auth, which allowlists the launch
-//! note and prices it.
-//!
-//! A launch is one-way and total: the owner's note mints the whole maximum supply
-//! once, pays it to a recipient, and records the supply so the faucet reports it.
-//! The standard component's own minting procedure stays unreachable, because this
-//! account installs no mint policy and that procedure aborts without one.
+//! `launch` mints exactly the maximum supply recorded in the token config, once,
+//! and pays it out in one P2ID note. The standard component's own mint is
+//! unreachable: it aborts without an active mint policy, and none is installed.
 
 #![no_std]
 #![feature(alloc_error_handler)]

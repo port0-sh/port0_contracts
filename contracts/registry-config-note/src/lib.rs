@@ -1,15 +1,11 @@
 //! Registry config note script.
 //!
-//! Consumed by the pool registry. Note storage, in order:
+//! Note storage: `[registry_prefix, registry_suffix, new_register_fee,
+//! register_note_root_0..3]`.
 //!
-//! ```text
-//! [registry_prefix, registry_suffix, new_register_fee, script_root (4 felts)]
-//! ```
-//!
-//! The script asserts the executing account is the registry named in storage,
-//! then calls the registry's `set_register_fee`. The registry checks the note's
-//! sender against the admin it was created with, so this note can only change
-//! the price when the admin emits it.
+//! Asserts the executing account is the registry named in storage, then calls
+//! `set_register_fee`, which requires the note's sender to be the registry's
+//! admin.
 
 #![no_std]
 #![feature(alloc_error_handler)]

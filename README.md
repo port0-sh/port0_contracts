@@ -52,46 +52,25 @@ the owner and the `launched` flag to be zero. The supply is read from the faucet
 configuration and written back as the token supply, so the faucet reports what it
 minted.
 
-## Concepts
+## Lifecycle
 
-- Pool: a single account that holds token0 and token1. Its fee rates, P2ID
-  root, and registry pointer are initial storage and hold for its lifetime.
-- Registry: a public network account that holds the accepted pool code
-  commitments, the registered pools, the ordered asset pair index, the protocol
-  fee policy, and the expected pool storage roots. It has one admin, whose only
-  power is to change the register fee.
-- LP token: a native fungible asset issued by the pool account. The asset key
-  is derived from the pool's account id at run time, not stored. The account
-  carries the standard fungible faucet component, so the token has a name, a
-  symbol, and decimals. An amount `a`
-  of LP tokens entitles the holder to the fraction `a / lp_supply` of the
-  reserves.
-- Roles:
-  - Pool creator emits the register note to record the pool in the registry.
-  - Liquidity provider emits mint and burn notes.
-  - Trader emits swap notes.
-  - Fee recipient emits collect notes against a pool, or registry-collect notes
-    against the registry. Both are permissionless.
-  - Registry admin emits the registry-config note, which changes the register
-    fee and nothing else.
-  - Token owner emits the launch note, which mints the faucet's whole supply
-    once.
+1. Create the pool account. Initial storage holds the two token asset keys, both
+   fee rates, the P2ID note root, and the registry pointer. The LP asset key is
+   derived from the pool's account id and is not stored.
+2. Fund the pool with a note and consume it as the pool's first transaction: a
+   network account requires every transaction to have an effect.
+3. The creator emits a register note; the registry verifies the pool and lists it.
+4. Liquidity providers emit mint and burn notes, traders emit swap notes, and the
+   fee recipient emits collect notes. Collects are permissionless.
 
-## Usage
-
-1. Create the pool account. Its initial storage holds the token0 and token1
-   asset keys, the two fee rates, the P2ID note root, and the registry pointer.
-   The LP token key is derived from the pool's account id and is not stored.
-2. Fund the pool with a note, then consume that note as the pool's first
-   transaction. A network account requires every transaction to have an effect,
-   so an empty scriptless deploy is rejected.
-3. The creator emits the register note to record the pool in the registry.
-4. Liquidity providers emit mint notes to add liquidity and burn notes to
-   remove it.
-5. Traders emit swap notes.
-6. The fee recipient emits collect notes to withdraw a pool's protocol fees.
-   Anyone may emit a registry-collect note to move the registry's accumulated
-   value to the protocol account.
+| Role | Note |
+| --- | --- |
+| Pool creator | `register` |
+| Liquidity provider | `mint`, `burn` |
+| Trader | `swap` |
+| Fee recipient | `collect`, `registry-collect` (both permissionless) |
+| Registry admin | `registry-config`, which changes the register fee only |
+| Token owner | `launch`, which mints a network faucet's supply once |
 
 ## Notes
 

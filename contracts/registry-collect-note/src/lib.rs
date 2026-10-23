@@ -1,17 +1,11 @@
 //! Registry collect note script.
 //!
-//! Consumed by the pool registry. Note storage, in order:
+//! Note storage: `[registry_prefix, registry_suffix, serial_0..3, asset_key_0..n]`,
+//! four felts per key.
 //!
-//! ```text
-//! [registry_prefix, registry_suffix,
-//!  serial_0, serial_1, serial_2, serial_3,
-//!  asset_key_0 (4 felts), asset_key_1 (4 felts), ...]
-//! ```
-//!
-//! The script asserts the executing account is the registry named in storage, then calls the
-//! registry's `collect` once per asset key. Collection is permissionless, like a pool's: the
-//! destination is the registry's configured protocol account, so a caller can only flush
-//! accumulated value toward it.
+//! Asserts the executing account is the registry named in storage, then calls
+//! `collect` once per key. Collection is permissionless: the destination is the
+//! registry's configured protocol account.
 
 #![no_std]
 #![feature(alloc_error_handler)]

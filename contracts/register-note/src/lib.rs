@@ -1,17 +1,10 @@
 //! Register note script.
 //!
-//! Consumed by the pool registry account. Note storage, in order:
+//! Note storage: `[registry_prefix, registry_suffix, pool_prefix, pool_suffix,
+//! asset0_prefix, asset0_suffix, asset1_prefix, asset1_suffix]`.
 //!
-//! ```text
-//! [registry_prefix, registry_suffix,
-//!  pool_prefix, pool_suffix,
-//!  asset_0_prefix, asset_0_suffix,
-//!  asset_1_prefix, asset_1_suffix]
-//! ```
-//!
-//! The script asserts the executing account is the registry named in storage,
-//! then calls the registry's `register` procedure. Registration verifies the
-//! pool's code commitment by FPI and records the pool and its asset pair.
+//! Asserts the executing account is the registry named in storage, then calls
+//! `register`, which verifies the pool on chain before listing it.
 
 #![no_std]
 #![feature(alloc_error_handler)]

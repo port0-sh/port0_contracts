@@ -1,16 +1,10 @@
 //! Launch note script.
 //!
-//! Consumed by a network faucet. Note storage, in order:
+//! Note storage: `[faucet_prefix, faucet_suffix, recipient_prefix,
+//! recipient_suffix, serial_0..3, tag]`.
 //!
-//! ```text
-//! [faucet_prefix, faucet_suffix, recipient_prefix, recipient_suffix,
-//!  serial_0, serial_1, serial_2, serial_3, tag]
-//! ```
-//!
-//! The script asserts the executing account is the faucet named in storage, then
-//! calls the faucet's `launch`, which is gated on the faucet's owner and on the
-//! token not having been launched yet. The note's own sender is what the faucet
-//! checks, so a launch note emitted by anyone but the owner aborts.
+//! Asserts the executing account is the faucet named in storage, then calls
+//! `launch`, which checks the note's sender against the faucet's owner.
 
 #![no_std]
 #![feature(alloc_error_handler)]
