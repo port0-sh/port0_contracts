@@ -13,26 +13,28 @@ struct SwapNoteNote;
 impl SwapNoteNote {
     #[note_script]
     pub fn run(self, _arg: Word, account: &mut NativeAccount) {
-        if active_note::get_sender().eq(&active_account::get_id()) {
-            self.reclaim();
+        let storage = active_note::get_storage();
+        assert!(
+            storage.len() == 15,
+            "Invalid number of arguments in the note"
+        );
+        let pool_id = AccountId::new(storage[0], storage[1]);
+        if active_account::get_id().eq(&pool_id) {
+            self.run_swap(account, &storage)
         } else {
-            self.run_swap(account)
+            self.reclaim();
         }
     }
 
     fn reclaim(self) {
-        // for asset in active_note::get_initial_assets() {
-        //     todo!("How to actually call wallet?");
-        // }
+        // A spot swap never needs this branch: the pool consumes the note and
+        // refunds a trade that cannot fill. It remains for notes that never
+        // reach the pool, and it is implemented once the SDK can call the
+        // standards wallet's `receive_asset`.
         return;
     }
 
-    fn run_swap(self, account: &mut NativeAccount) {
-        let storage = active_note::get_storage();
-        assert!(
-            storage.len() == 11,
-            "Invalid number of arguments in the note"
-        );
+    fn run_swap(self, account: &mut NativeAccount, storage: &[Felt]) {
         let pool_id = AccountId::new(storage[0], storage[1]);
         assert!(
             active_account::get_id().eq(&pool_id),
@@ -41,17 +43,9 @@ impl SwapNoteNote {
         let recipient = AccountId::new(storage[2], storage[3]);
         let serial_num = Word::from([storage[4], storage[5], storage[6], storage[7]]);
         let tag = storage[8];
-        let deadline = storage[9];
-        assert!(
-            deadline.as_canonical_u64() > tx::get_block_timestamp() as u64,
-            "Note is past its deadline",
-        );
-        let min_amount_out = storage[10];
-        account.swap(
-            recipient,
-            serial_num,
-            tag,
-            min_amount_out.as_canonical_u64(),
-        );
+        let deadline = storage[9].as_canonical_u64();
+        let min_amount_out = storage[10].as_canonical_u64();
+        let refund_tag = storage[11];
+        account.swap(recipient, serial_num, tag, deadline, min_amount_out, refund_tag);
     }
 }

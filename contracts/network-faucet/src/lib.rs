@@ -41,14 +41,7 @@ fn p2id_root() -> Word {
     ])
 }
 
-/// The standard faucet component's token config slot, holding
-/// `[token_supply, max_supply, decimals, token_symbol]`.
-fn token_config_slot() -> StorageSlotId {
-    StorageSlotId::new(
-        Felt::new_unchecked(10339737737024460521),
-        Felt::new_unchecked(13038161168137044496),
-    )
-}
+include!("../../token-config-slot.rs");
 
 #[component_storage]
 struct NetworkFaucetStorage {

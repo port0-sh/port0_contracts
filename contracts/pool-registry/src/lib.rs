@@ -38,6 +38,21 @@ fn get_code_commitment_root() -> Word {
     ])
 }
 
+/// Root of the pool's `get_lifecycle` procedure.
+///
+/// Printed by `cargo run -p integration --bin registry_roots --release -- port0`.
+/// A pool is registered before its first mint, so reserves, LP supply, the
+/// protocol pot, and the price oracle must all be zero. A seeded pool would
+/// otherwise set a price or a history the registry never admitted.
+fn get_lifecycle_root() -> Word {
+    Word::new([
+        Felt::new_unchecked(4873603807012484848),
+        Felt::new_unchecked(17316591879565791065),
+        Felt::new_unchecked(4232174160422698928),
+        Felt::new_unchecked(13470334063995758170),
+    ])
+}
+
 /// Root of the pool's `get_registry_identity` procedure.
 ///
 /// Printed by `cargo run -p integration --bin registry_roots --release -- port0`.
@@ -231,6 +246,20 @@ impl PoolRegistry for PoolRegistryStorage {
         // that drains the vault through the wallet's `move_asset_to_note`. The
         // pool exposes its auth roots, and they must match the values this
         // registry was created with.
+        // A pool with a market already in place would list a price the registry
+        // never admitted. The first mint is the only entry to a market.
+        let lifecycle = tx::execute_foreign_procedure(
+            pool_id,
+            get_lifecycle_root(),
+            tx::ForeignProcedureInputs::new([]),
+        );
+        for index in 0..14 {
+            assert!(
+                lifecycle.get(index).as_canonical_u64() == 0,
+                "Pool must be registered before its first mint: reserves, LP supply, pot, and oracle must be zero"
+            );
+        }
+
         let auth = tx::execute_foreign_procedure(
             pool_id,
             get_auth_identity_root(),

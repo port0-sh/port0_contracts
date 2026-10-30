@@ -26,12 +26,14 @@
 #[allow(dead_code)]
 const COLLECT_MAX_KEYS: usize = 4;
 
-/// Pool collect, four asset keys including the fee asset: 125,270 cycles,
-/// rounded to 2^17, priced at 7 * 18 = 126.
+/// Pool collect, four asset keys including the fee asset: 130,846 cycles,
+/// which the kernel prices at `7 * (ilog2(130,846) + 1)` = 119. The hold is the
+/// scheduled price, 126: the measured fee plus the pricer's one-cycle margin.
 #[allow(dead_code)]
 const POOL_COLLECT_FEE_HOLD: u64 = 126;
 
-/// Registry collect, four asset keys including the fee asset: 64,799 cycles,
-/// rounded to 2^16, priced at 7 * (16 + 1) = 119.
+/// Registry collect, four asset keys including the fee asset: 70,141 cycles,
+/// which the kernel prices at `7 * (ilog2(70,141) + 1)` = 119. The hold is the
+/// scheduled price, 126.
 #[allow(dead_code)]
-const REGISTRY_COLLECT_FEE_HOLD: u64 = 119;
+const REGISTRY_COLLECT_FEE_HOLD: u64 = 126;

@@ -21,6 +21,7 @@ use crate::{
         fees::{Fees, ProtocolPot},
         mint::{MintQuote, quote_mint},
         reserves::Reserves,
+        MINIMUM_LIQUIDITY,
         swap::{SwapQuote, amount_out},
     },
     utils::{asset::compose_asset, note::account_target_tag, u128::U128},
@@ -82,6 +83,7 @@ struct Port0Storage {
 // value and its measurement live in `contracts/collect-fee-hold.rs`, which the
 // benchmark and the SDK read too.
 include!("../../collect-fee-hold.rs");
+include!("../../token-config-slot.rs");
 
 const COLLECT_FEE_HOLD: u64 = POOL_COLLECT_FEE_HOLD;
 
@@ -107,18 +109,36 @@ trait Port0: NativeAccount {
     #[account_procedure]
     fn get_fees(&self) -> Fees;
     #[account_procedure]
-    fn mint(&mut self, recipient: AccountId, serial_num: Word, tag: Felt, min_lp_out: u64);
+    fn mint(
+        &mut self,
+        recipient: AccountId,
+        serial_num: Word,
+        tag: Felt,
+        deadline: u64,
+        min_lp_out: u64,
+        refund_tag: Felt,
+    );
     #[account_procedure]
     fn burn(
         &mut self,
         recipient: AccountId,
         serial_num: Word,
         tag: Felt,
+        deadline: u64,
         min_token0_out: u64,
         min_token1_out: u64,
+        refund_tag: Felt,
     );
     #[account_procedure]
-    fn swap(&mut self, recipient: AccountId, serial_num: Word, tag: Felt, min_amount_out: u64);
+    fn swap(
+        &mut self,
+        recipient: AccountId,
+        serial_num: Word,
+        tag: Felt,
+        deadline: u64,
+        min_amount_out: u64,
+        refund_tag: Felt,
+    );
     #[account_procedure]
     fn quote_swap(&self, token_in_is_0: bool, amount_in: u64) -> SwapQuote;
     #[account_procedure]
@@ -126,6 +146,9 @@ trait Port0: NativeAccount {
     /// The pool's registry, token keys, and fee rates, for registration checks.
     #[account_procedure]
     fn get_registry_identity(&self) -> PoolIdentity;
+    /// Reserves, LP supply, and protocol pot, for the registry's zero check.
+    #[account_procedure]
+    fn get_lifecycle(&self) -> Lifecycle;
     /// The roots of the pool's auth component storage: the two note allowlists
     /// and the fee schedule. The registry compares them against the values it
     /// was created with, because the code commitment pins code, not storage,
@@ -206,6 +229,21 @@ pub struct AuthIdentity {
     pub fee_schedule_root: Word,
 }
 
+/// The pool's economic state at registration. Every field must be zero: a pool
+/// is registered before its market exists, so a seeded price, supply, or pot
+/// cannot be listed.
+#[export_type]
+pub struct Lifecycle {
+    pub reserve0: Felt,
+    pub reserve1: Felt,
+    pub lp_supply: Felt,
+    pub pot0: Felt,
+    pub pot1: Felt,
+    pub price0_cumulative_last: U128,
+    pub price1_cumulative_last: U128,
+    pub block_timestamp_last: Felt,
+}
+
 /// The pool's fee-manager storage, in the order `get_fee_identity` returns it.
 ///
 /// Split from `AuthIdentity` because a procedure cannot return six words on the
@@ -264,6 +302,20 @@ impl Port0Storage {
         COLLECT_FEE_HOLD
     }
 
+    /// Records the circulating LP supply in the LP faucet's token config. The
+    /// locked minimum is virtual and is never an asset, so it is excluded.
+    fn write_lp_supply(&mut self, lp_supply: u64) {
+        let config = storage::get_item(token_config_slot());
+        storage::set_item(
+            token_config_slot(),
+            Word::new([
+                Felt::new_unchecked(lp_supply - MINIMUM_LIQUIDITY),
+                config[1],
+                config[2],
+                config[3],
+            ]),
+        );
+    }
     fn add_asset_to_output_note(&mut self, asset: Asset, note_idx: NoteIdx) {
         output_note::add_asset(asset, note_idx);
     }
@@ -326,6 +378,28 @@ impl Port0Storage {
         self.price0_cumulative_last.set(U128::new(c0));
         self.price1_cumulative_last.set(U128::new(c1));
     }
+    /// Rejects a trade that cannot fill. A spot swap (`deadline == 0`) and an
+    /// expired limit refund; an unexpired limit aborts, so its note stays
+    /// pending and the network builder retries it.
+    fn reject(&mut self, serial_num: Word, tag: Felt, deadline: u64) {
+        if deadline != 0 && (tx::get_block_timestamp() as u64) < deadline {
+            panic!("Trade cannot fill before the deadline");
+        }
+        self.refund_to_sender(serial_num, tag);
+    }
+    /// Pays the note's assets back to its sender as one P2ID note. The note is
+    /// being consumed, so the assets enter and leave the vault in one
+    /// transaction and the reserves do not move.
+    fn refund_to_sender(&mut self, serial_num: Word, tag: Felt) {
+        let assets = active_note::get_initial_assets();
+        let sender = active_note::get_sender();
+        let note_idx = self.prepare_output_note(sender, serial_num, tag, self.p2id_root.get());
+        for asset in assets.iter() {
+            self.add_asset(*asset);
+            native_account::remove_asset(*asset);
+            self.add_asset_to_output_note(*asset, note_idx);
+        }
+    }
 }
 
 #[component]
@@ -360,31 +434,60 @@ impl Port0 for Port0Storage {
         );
         reserves
     }
-    fn mint(&mut self, recipient: AccountId, serial_num: Word, tag: Felt, min_lp_out: u64) {
+    fn mint(
+        &mut self,
+        recipient: AccountId,
+        serial_num: Word,
+        tag: Felt,
+        deadline: u64,
+        min_lp_out: u64,
+        refund_tag: Felt,
+    ) {
+        let assets = active_note::get_initial_assets();
         let reserves = self.get_reserves();
-        self.update_oracle(reserves);
-        let mut amount0_in_note = 0u64;
-        let mut amount1_in_note = 0u64;
         let (token0_asset_key, token1_asset_key, tokenlp_asset_key) = (
             self.token0_asset_key(),
             self.token1_asset_key(),
             self.lp_asset_key(),
         );
-        for asset in active_note::get_initial_assets() {
-            assert!(
-                asset.is_fungible(),
-                "Mint note contains non-fungible tokens"
-            );
+        if assets.len() != 2 {
+            self.refund_to_sender(serial_num, refund_tag);
+            return;
+        }
+        let mut amount0_in_note = 0u64;
+        let mut amount1_in_note = 0u64;
+        for asset in assets.iter() {
+            if !asset.is_fungible() {
+                self.refund_to_sender(serial_num, refund_tag);
+                return;
+            }
             if Word::from(asset.id).eq(&token0_asset_key) {
+                if amount0_in_note != 0 {
+                    self.refund_to_sender(serial_num, refund_tag);
+                    return;
+                }
                 amount0_in_note = asset.value[0].as_canonical_u64();
             } else if Word::from(asset.id).eq(&token1_asset_key) {
+                if amount1_in_note != 0 {
+                    self.refund_to_sender(serial_num, refund_tag);
+                    return;
+                }
                 amount1_in_note = asset.value[0].as_canonical_u64();
             } else {
-                panic!("Mint note has an asset that is neither token0 nor token1");
+                self.refund_to_sender(serial_num, refund_tag);
+                return;
             }
-            self.add_asset(asset);
         }
-
+        if deadline != 0 && (tx::get_block_timestamp() as u64) >= deadline {
+            self.refund_to_sender(serial_num, refund_tag);
+            return;
+        }
+        let quote = quote_mint(
+            amount0_in_note,
+            amount1_in_note,
+            reserves,
+            self.lp_supply.get().as_canonical_u64(),
+        );
         let MintQuote {
             liquidity_to_user,
             lp_supply_after,
@@ -392,17 +495,21 @@ impl Port0 for Port0Storage {
             reserve1_after,
             refund0,
             refund1,
-        } = quote_mint(
-            amount0_in_note,
-            amount1_in_note,
-            reserves,
-            self.lp_supply.get().as_canonical_u64(),
-        )
-        .unwrap();
-        assert!(
-            liquidity_to_user >= min_lp_out,
-            "LP out would be less than desired"
-        );
+        } = match quote {
+            Ok(quote) => quote,
+            Err(_) => {
+                self.reject(serial_num, refund_tag, deadline);
+                return;
+            }
+        };
+        if liquidity_to_user < min_lp_out {
+            self.reject(serial_num, refund_tag, deadline);
+            return;
+        }
+        self.update_oracle(reserves);
+        for asset in assets.iter() {
+            self.add_asset(*asset);
+        }
         let note_idx = self.prepare_output_note(recipient, serial_num, tag, self.p2id_root.get());
         let lp_asset = compose_asset(tokenlp_asset_key, liquidity_to_user).unwrap();
         faucet::mint(lp_asset);
@@ -418,6 +525,7 @@ impl Port0 for Port0Storage {
             native_account::remove_asset(asset);
         }
         self.lp_supply.set(Felt::new_unchecked(lp_supply_after));
+        self.write_lp_supply(lp_supply_after);
         self.reserves.set(Reserves {
             reserve0: reserve0_after,
             reserve1: reserve1_after,
@@ -428,47 +536,55 @@ impl Port0 for Port0Storage {
         recipient: AccountId,
         serial_num: Word,
         tag: Felt,
+        deadline: u64,
         min_amount0_out: u64,
         min_amount1_out: u64,
+        refund_tag: Felt,
     ) {
-        self.update_oracle(self.get_reserves());
+        let assets = active_note::get_initial_assets();
+        let reserves = self.get_reserves();
         let (token0_asset_key, token1_asset_key, tokenlp_asset_key) = (
             self.token0_asset_key(),
             self.token1_asset_key(),
             self.lp_asset_key(),
         );
-        let assets = active_note::get_initial_assets();
-        assert!(assets.len() == 1, "Burn note should contain only one asset");
+        if assets.len() != 1 {
+            self.refund_to_sender(serial_num, refund_tag);
+            return;
+        }
         let asset = assets[0];
-        assert!(
-            asset.is_fungible(),
-            "Burn note contains a non-fungible token"
-        );
-        assert!(
-            Word::from(asset.id).eq(&tokenlp_asset_key),
-            "Burn note has an asset that is not the LP token"
-        );
+        if !asset.is_fungible() || !Word::from(asset.id).eq(&tokenlp_asset_key) {
+            self.refund_to_sender(serial_num, refund_tag);
+            return;
+        }
+        if deadline != 0 && (tx::get_block_timestamp() as u64) >= deadline {
+            self.refund_to_sender(serial_num, refund_tag);
+            return;
+        }
         let amount_in_note = asset.value[0].as_canonical_u64();
+        let quote = quote_burn(
+            amount_in_note,
+            reserves,
+            self.lp_supply.get().as_canonical_u64(),
+        );
         let BurnQuote {
             amount0,
             amount1,
             lp_supply_after,
             reserve0_after,
             reserve1_after,
-        } = quote_burn(
-            amount_in_note,
-            self.get_reserves(),
-            self.lp_supply.get().as_canonical_u64(),
-        )
-        .unwrap();
-        assert!(
-            amount0 >= min_amount0_out,
-            "Amount of token0 out would be less than desired"
-        );
-        assert!(
-            amount1 >= min_amount1_out,
-            "Amount of token1 out would be less than desired"
-        );
+        } = match quote {
+            Ok(quote) => quote,
+            Err(_) => {
+                self.reject(serial_num, refund_tag, deadline);
+                return;
+            }
+        };
+        if amount0 < min_amount0_out || amount1 < min_amount1_out {
+            self.reject(serial_num, refund_tag, deadline);
+            return;
+        }
+        self.update_oracle(reserves);
         let asset0 = compose_asset(token0_asset_key, amount0).unwrap();
         let asset1 = compose_asset(token1_asset_key, amount1).unwrap();
         let note_idx = self.prepare_output_note(recipient, serial_num, tag, self.p2id_root.get());
@@ -478,6 +594,7 @@ impl Port0 for Port0Storage {
         native_account::remove_asset(asset1);
         faucet::burn(asset);
         self.lp_supply.set(Felt::new_unchecked(lp_supply_after));
+        self.write_lp_supply(lp_supply_after);
         self.reserves.set(Reserves {
             reserve0: reserve0_after,
             reserve1: reserve1_after,
@@ -501,54 +618,67 @@ impl Port0 for Port0Storage {
         .unwrap();
         quote
     }
-    fn swap(&mut self, recipient: AccountId, serial_num: Word, tag: Felt, min_amount_out: u64) {
-        let reserves = self.get_reserves();
-        self.update_oracle(reserves);
+    fn swap(
+        &mut self,
+        recipient: AccountId,
+        serial_num: Word,
+        tag: Felt,
+        deadline: u64,
+        min_amount_out: u64,
+        refund_tag: Felt,
+    ) {
+        // A spot swap is fill-or-refund: every condition that cannot fill pays
+        // the input back to the note's sender, so the note is consumed and never
+        // stays pending. A limit (`deadline > 0`) aborts until its deadline and
+        // refunds at expiry.
         let assets = active_note::get_initial_assets();
-        assert!(assets.len() == 1, "Swap note should contain only one asset");
+        if assets.len() != 1 || !assets[0].is_fungible() {
+            self.refund_to_sender(serial_num, refund_tag);
+            return;
+        }
+        if deadline != 0 && (tx::get_block_timestamp() as u64) >= deadline {
+            self.refund_to_sender(serial_num, refund_tag);
+            return;
+        }
         let asset = assets[0];
-        assert!(
-            asset.is_fungible(),
-            "Swap note contains a non-fungible token"
-        );
+        let reserves = self.get_reserves();
         let (token0_asset_key, token1_asset_key) =
             (self.token0_asset_key(), self.token1_asset_key());
-        let (token_in, token_out, reserve_in, reserve_out) = if Word::from(asset.id).eq(&token0_asset_key) {
-            (
-                token0_asset_key,
-                token1_asset_key,
-                reserves.reserve0,
-                reserves.reserve1,
-            )
-        } else if Word::from(asset.id).eq(&token1_asset_key) {
-            (
-                token1_asset_key,
-                token0_asset_key,
-                reserves.reserve1,
-                reserves.reserve0,
-            )
-        } else {
-            panic!("Swap note has an asset that is neither token0 nor token1");
-        };
+        let (token_in, token_out, reserve_in, reserve_out) =
+            if Word::from(asset.id).eq(&token0_asset_key) {
+                (token0_asset_key, token1_asset_key, reserves.reserve0, reserves.reserve1)
+            } else if Word::from(asset.id).eq(&token1_asset_key) {
+                (token1_asset_key, token0_asset_key, reserves.reserve1, reserves.reserve0)
+            } else {
+                self.reject(serial_num, refund_tag, deadline);
+                return;
+            };
         let amount_in = asset.value[0].as_canonical_u64();
         let fees = self.fees.get();
-        let SwapQuote {
-            amount_out,
-            reserve_in_after,
-            reserve_out_after,
-            protocol_fee,
-        } = amount_out(
+        let quote = amount_out(
             amount_in,
             reserve_in,
             reserve_out,
             fees.lp_fee_bps,
             fees.protocol_fee_share_bps,
-        )
-        .unwrap();
-        assert!(
-            amount_out >= min_amount_out,
-            "Amount out would be less than desired"
         );
+        let SwapQuote {
+            amount_out,
+            reserve_in_after,
+            reserve_out_after,
+            protocol_fee,
+        } = match quote {
+            Ok(quote) => quote,
+            Err(_) => {
+                self.reject(serial_num, refund_tag, deadline);
+                return;
+            }
+        };
+        if amount_out == 0 || amount_out < min_amount_out {
+            self.reject(serial_num, refund_tag, deadline);
+            return;
+        }
+        self.update_oracle(reserves);
         let asset_out = compose_asset(token_out, amount_out).unwrap();
         let note_idx = self.prepare_output_note(recipient, serial_num, tag, self.p2id_root.get());
         native_account::remove_asset(asset_out);
@@ -590,6 +720,20 @@ impl Port0 for Port0Storage {
         }
     }
 
+    fn get_lifecycle(&self) -> Lifecycle {
+        let reserves = self.reserves.get();
+        let pot = self.protocol_pot.get();
+        Lifecycle {
+            reserve0: Felt::new_unchecked(reserves.reserve0),
+            reserve1: Felt::new_unchecked(reserves.reserve1),
+            lp_supply: self.lp_supply.get(),
+            pot0: Felt::new_unchecked(pot.amount0),
+            pot1: Felt::new_unchecked(pot.amount1),
+            price0_cumulative_last: self.price0_cumulative_last.get(),
+            price1_cumulative_last: self.price1_cumulative_last.get(),
+            block_timestamp_last: self.block_timestamp_last.get(),
+        }
+    }
     fn get_registry_identity(&self) -> PoolIdentity {
         let fees = self.get_fees();
         PoolIdentity {

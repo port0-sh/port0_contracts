@@ -1,8 +1,9 @@
 use miden::{Felt, Word, WordValue, export_type};
 
 #[export_type]
+#[derive(Debug, Clone, Copy)]
 pub struct U128 {
-    inner: Word,
+    pub inner: Word,
 }
 
 impl U128 {
