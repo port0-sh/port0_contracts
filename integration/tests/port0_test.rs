@@ -363,6 +363,7 @@ fn pool_init_storage_with_registry(
         protocol_fee_share_bps,
         initial_reserves,
         Word::from(P2idNote::script_root()),
+        (Word::default(), Word::default(), Felt::ZERO),
     )
 }
 
@@ -377,6 +378,7 @@ fn pool_init_storage_full(
     protocol_fee_share_bps: u32,
     initial_reserves: (u64, u64),
     p2id_root: Word,
+    oracle: (Word, Word, Felt),
 ) -> Result<InitStorageData> {
     let mut init = InitStorageData::default();
     init.insert_value(
@@ -415,15 +417,15 @@ fn pool_init_storage_full(
     init.insert_value(StorageValueName::from_slot_name(&slot("protocol_pot")), Word::default())?;
     init.insert_value(
         StorageValueName::from_slot_name(&slot("price0_cumulative_last")),
-        Word::default(),
+        oracle.0,
     )?;
     init.insert_value(
         StorageValueName::from_slot_name(&slot("price1_cumulative_last")),
-        Word::default(),
+        oracle.1,
     )?;
     init.insert_value(
         StorageValueName::from_slot_name(&slot("block_timestamp_last")),
-        Felt::ZERO,
+        oracle.2,
     )?;
     init.insert_value(
         StorageValueName::from_slot_name(&slot("registry_id")),
@@ -645,10 +647,38 @@ fn add_pool_account_network_with_p2id(
         PROTOCOL_FEE_SHARE_BPS,
         (0, 0),
         p2id_root,
+        (Word::default(), Word::default(), Felt::ZERO),
     )?;
     let component = AccountComponent::from_package(package.as_ref().clone(), &init)
         .context("failed to build account component from port0 package")?;
     let account = build_network_account(builder, [7_u8; 32], component, vec![], allowed_roots)?;
+    Ok(account.id())
+}
+
+/// A network pool whose oracle fields are seeded at creation, reserves zero.
+fn add_pool_account_network_with_oracle(
+    builder: &mut MockChainBuilder,
+    package: Arc<Package>,
+    token0_key: Word,
+    token1_key: Word,
+    registry_id: AccountId,
+    oracle: (Word, Word, Felt),
+    allowed_roots: BTreeSet<NoteScriptRoot>,
+) -> Result<AccountId> {
+    let init = pool_init_storage_full(
+        token0_key,
+        token1_key,
+        registry_id,
+        registry_id,
+        LP_FEE_BPS,
+        PROTOCOL_FEE_SHARE_BPS,
+        (0, 0),
+        Word::from(P2idNote::script_root()),
+        oracle,
+    )?;
+    let component = AccountComponent::from_package(package.as_ref().clone(), &init)
+        .context("failed to build account component from port0 package")?;
+    let account = build_network_account(builder, [9_u8; 32], component, vec![], allowed_roots)?;
     Ok(account.id())
 }
 
@@ -1037,9 +1067,8 @@ async fn mint_provides_initial_liquidity() -> Result<()> {
     let expected_lp = isqrt(amount0 as u128 * amount1 as u128);
     assert_eq!(read_scalar(&mock_chain, pool, "lp_supply")?, expected_lp, "lp supply mismatch");
 
-    // The LP asset must be issued by the pool, whose asset key is derived from
-    // its own account id. This is what `configure` used to assert, kept end to
-    // end now that nothing writes the key.
+    // The LP asset is issued by the pool, so its key is derived from the pool's
+    // own account id and no other account can mint it.
     let lp_asset = mock_chain
         .committed_notes()
         .values()
@@ -2265,6 +2294,77 @@ async fn register_rejects_a_pool_with_seeded_reserves() -> Result<()> {
     Ok(())
 }
 
+/// A pool with zero reserves but a seeded oracle is rejected: R1's acceptance.
+///
+/// The registry reads the pool's lifecycle and requires every field to be zero,
+/// so a creation that seeded the cumulative price or the last timestamp while
+/// holding no liquidity cannot be listed.
+#[tokio::test]
+async fn register_rejects_a_pool_with_a_seeded_oracle() -> Result<()> {
+    let contracts = Contracts::build()?;
+    let mut builder = MockChain::builder();
+
+    let token0_faucet =
+        builder.add_existing_basic_faucet(basic_auth(), "ALPHA", 2_000_000, Some(2_000_000))?;
+    let token1_faucet =
+        builder.add_existing_basic_faucet(basic_auth(), "BETA", 2_000_000, Some(2_000_000))?;
+    let admin = builder.add_existing_wallet(basic_auth())?;
+    let fee_to = builder.add_existing_wallet(basic_auth())?;
+
+    let token0_key = FungibleAsset::new(token0_faucet.id(), 1)?.to_id_word();
+    let token1_key = FungibleAsset::new(token1_faucet.id(), 1)?.to_id_word();
+
+    let pool_roots = pool_note_roots(&contracts)?;
+    let fixture = pool_code_commitment_network(
+        &mut builder,
+        contracts.port0.clone(),
+        token0_key,
+        token1_key,
+        admin.id(),
+        &pool_roots,
+    )?;
+    let registry = add_registry_account_network(
+        &mut builder,
+        contracts.registry.clone(),
+        fee_to.id(),
+        PROTOCOL_FEE_SHARE_BPS,
+        fixture.commitment,
+        fixture.auth_roots,
+        register_note_root(&contracts)?,
+        vec![],
+        registry_note_roots(&contracts)?,
+    )?;
+    let pool = add_pool_account_network_with_oracle(
+        &mut builder,
+        contracts.port0.clone(),
+        token0_key,
+        token1_key,
+        registry,
+        (
+            Word::from([Felt::new_unchecked(1), Felt::ZERO, Felt::ZERO, Felt::ZERO]),
+            Word::default(),
+            Felt::new_unchecked(42),
+        ),
+        pool_roots,
+    )?;
+
+    let register_note = build_note(
+        contracts.register_note.clone(),
+        admin.id(),
+        register_note_storage(registry, pool, token0_faucet.id(), token1_faucet.id()),
+        vec![],
+    )?;
+    builder.add_output_note(RawOutputNote::Full(register_note.clone()));
+
+    let mut mock_chain = builder.build()?;
+    let result = consume_note_with_foreign(&mut mock_chain, registry, &register_note, pool).await;
+    assert!(
+        result.is_err(),
+        "a pool with a seeded oracle and zero reserves must not be registered"
+    );
+    Ok(())
+}
+
 /// A pool charging a protocol fee the registry does not sanction is rejected.
 #[tokio::test]
 async fn register_rejects_a_pool_with_a_foreign_fee_rate() -> Result<()> {
@@ -2530,6 +2630,7 @@ async fn register_rejects_a_pool_with_a_foreign_fee_asset() -> Result<()> {
         PROTOCOL_FEE_SHARE_BPS,
         (0, 0),
         Word::from(P2idNote::script_root()),
+        (Word::default(), Word::default(), Felt::ZERO),
     )?;
     let component = AccountComponent::from_package(contracts.port0.as_ref().clone(), &init)
         .context("failed to build account component from port0 package")?;
@@ -3907,9 +4008,10 @@ async fn note_fee_benchmark() -> Result<()> {
 
     for (name, root, cycles) in &measured {
         let fee = kernel_fee(*cycles as u32);
-        // `collect` reserves this fee out of the fee asset before paying out, so the
-        // reservation must cover each measured collect path. The constants are
-        // `COLLECT_FEE_HOLD` in `contracts/port0` (119) and `contracts/pool-registry` (112).
+        // `collect` reserves the scheduled price out of the fee asset before paying
+        // out, so the hold must cover each measured collect path. The constants are
+        // `POOL_COLLECT_FEE_HOLD` and `REGISTRY_COLLECT_FEE_HOLD` in
+        // `contracts/collect-fee-hold.rs`, both 126: the price, not the kernel fee.
         let hold = if name.starts_with("pool collect") {
             POOL_COLLECT_FEE_HOLD
         } else if name.starts_with("registry collect") {
@@ -4378,14 +4480,41 @@ async fn spot_swap_refunds_when_minimum_cannot_be_met() -> Result<()> {
     Ok(())
 }
 
-/// Randomized operation sequence: the custody invariant holds after every
-/// mint, swap, and burn, whatever the amounts and order.
+/// Randomized operation sequences: the custody invariant holds after every
+/// mint, swap, and burn, over a sweep of the network's verification base fee.
 #[tokio::test]
 async fn invariant_holds_through_random_operations() -> Result<()> {
+    // The fee is the parameter that changes every path's economics: a collect
+    // reserves a fixed hold, and a base fee above it must fail closed. Two seeds
+    // per fee keep the sequence order from being a single story.
+    let contracts = Contracts::build()?;
+    for base_fee in [1, 7, 14, 30] {
+        for seed in [7, 11] {
+            run_invariant_sequence(&contracts, base_fee, seed, 25).await?;
+        }
+    }
+    Ok(())
+}
+
+/// The review's acceptance depth: 10,000 random operations at base fee 7.
+#[tokio::test]
+#[ignore = "deep acceptance run: thousands of operations; run manually"]
+async fn invariant_holds_through_ten_thousand_operations() -> Result<()> {
+    let contracts = Contracts::build()?;
+    run_invariant_sequence(&contracts, 7, 7, 10_000).await
+}
+
+/// One sequence: one mint to establish supply, then random mints, swaps and
+/// burns, checking after each step that the vault covers the reserves plus pot.
+async fn run_invariant_sequence(
+    contracts: &Contracts,
+    base_fee: u32,
+    seed: u64,
+    steps: usize,
+) -> Result<()> {
     use rand::prelude::*;
 
-    let contracts = Contracts::build()?;
-    let mut builder = MockChain::builder();
+    let mut builder = MockChain::builder().verification_base_fee(base_fee);
 
     let token0_faucet =
         builder.add_existing_basic_faucet(basic_auth(), "ALPHA", 20_000_000, Some(20_000_000))?;
@@ -4395,13 +4524,19 @@ async fn invariant_holds_through_random_operations() -> Result<()> {
 
     let token0_key = FungibleAsset::new(token0_faucet.id(), 1)?.to_id_word();
     let token1_key = FungibleAsset::new(token1_faucet.id(), 1)?.to_id_word();
-    let pool = add_pool_account(
+    // The pool pays the kernel fee from its own vault, so it holds the fee asset;
+    // its network auth commits the conversion info a non-zero fee requires. The
+    // registry is unused here: the sequence never collects.
+    let fee_faucet: AccountId = ACCOUNT_ID_FEE_FAUCET.try_into()?;
+    let pool = add_pool_account_network(
         &mut builder,
         contracts.port0.clone(),
         token0_key,
         token1_key,
         admin.id(),
-        vec![],
+        (0, 0),
+        vec![FungibleAsset::new(fee_faucet, 100_000_000)?.into()],
+        pool_note_roots(contracts)?,
     )?;
 
     let user = builder.add_existing_wallet_with_assets(
@@ -4416,9 +4551,9 @@ async fn invariant_holds_through_random_operations() -> Result<()> {
     // The mock chain only accepts notes at build time, so every note is built
     // first and the sequence is fixed: one mint to establish supply, then random
     // mints, swaps, and burns with random amounts.
-    let mut rng = rand::rngs::StdRng::seed_from_u64(7);
+    let mut rng = rand::rngs::StdRng::seed_from_u64(seed);
     let mut notes = Vec::new();
-    for step in 0..20 {
+    for step in 0..steps {
         let op: u32 = if step == 0 { 0 } else { rng.random_range(0..3) };
         notes.push(match op {
             0 => {
@@ -4495,11 +4630,11 @@ async fn invariant_holds_through_random_operations() -> Result<()> {
         let vault1 = vault_balance(&chain, pool, token1_faucet.id(), 1)?;
         assert!(
             vault0 >= reserves[0].as_canonical_u64() + pot[0].as_canonical_u64(),
-            "step {step}: token0 vault is below reserves plus pot"
+            "base fee {base_fee} seed {seed} step {step}: token0 vault is below reserves plus pot"
         );
         assert!(
             vault1 >= reserves[1].as_canonical_u64() + pot[1].as_canonical_u64(),
-            "step {step}: token1 vault is below reserves plus pot"
+            "base fee {base_fee} seed {seed} step {step}: token1 vault is below reserves plus pot"
         );
     }
     Ok(())

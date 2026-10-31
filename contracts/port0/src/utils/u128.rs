@@ -15,9 +15,6 @@ impl U128 {
     pub fn as_u128(&self) -> u128 {
         word_to_u128(self.inner)
     }
-    pub fn as_word(&self) -> Word {
-        self.inner
-    }
 }
 
 pub fn word_to_u128(w: Word) -> u128 {
