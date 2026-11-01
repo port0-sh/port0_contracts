@@ -33,14 +33,17 @@ Eleven contracts compose the system.
 
 The pool component exposes `token0_asset_key`, `token1_asset_key`, `lp_supply`,
 `get_reserves`, `get_fees`, `mint`, `burn`, `swap`, `quote_swap`, `collect`,
-`get_registry_identity`, `get_auth_identity`, and `get_fee_identity` as account
-procedures. A pool's fee rates, P2ID root, registry pointer, and token keys are
-part of its initial storage and hold for its lifetime.
+`get_registry_identity`, `get_auth_identity`, `get_fee_identity`, and
+`get_lifecycle` as account procedures. A pool's fee rates, P2ID root, registry
+pointer, and token keys are part of its initial storage and hold for its
+lifetime.
 `get_registry_identity` returns the registry pointer, the two token keys, the two
 fee rates, and the payout root as sixteen felts, and is the procedure the
 registry calls over foreign procedure invocation at registration.
 `get_auth_identity` and `get_fee_identity` return the six storage roots the
-registry pins.
+registry pins. `get_lifecycle` returns the pool's reserves, LP supply, protocol
+pot, oracle accumulators, and last block timestamp as fourteen felts, which the
+registry requires to be zero at registration.
 
 ## Registry
 
@@ -67,8 +70,8 @@ The registry account declares fifteen storage slots.
 `register` rejects equal assets, an already-registered pool id, and an
 already-registered asset pair. It then calls the pool's
 `CodeInspection::get_code_commitment`, `get_registry_identity`,
-`get_auth_identity`, and `get_fee_identity` by foreign procedure invocation and
-asserts:
+`get_auth_identity`, `get_fee_identity`, and `get_lifecycle` by foreign
+procedure invocation and asserts:
 
 - the returned commitment is in `accepted_code_commitments`;
 - the pool's registry pointer equals the executing registry;
@@ -80,7 +83,12 @@ asserts:
 - the pool's note allowlist, transaction-script allowlist, and fee schedule
   roots equal the values the registry was created with;
 - the pool's fee asset, active fee policy root, and allowed fee policy roots
-  equal the values the registry was created with.
+  equal the values the registry was created with;
+- the pool's reserves, LP supply, protocol pot, oracle accumulators, and last
+  block timestamp are all zero.
+
+The zero check keeps a seeded market out of the registry: a pool is registered
+before its first mint, so a chosen price, supply, or pot cannot be listed.
 
 The storage checks exist because a code commitment pins code and not storage: a
 pool could carry the accepted component set with an allowlist of its own, and an
@@ -150,6 +158,21 @@ Notes invoke pool procedures through the component interface. Pool procedures
 run in account context and may create output notes and move assets. Note scripts
 run in note context and may not perform these actions directly.
 
+## Refunds
+
+Every asset-carrying note carries a deadline and a refund commitment: the refund
+tag, the reclaimer, and the reclaim height. A deadline of zero is a spot note and
+a nonzero deadline is a limit.
+
+A spot note resolves in the attempt that consumes it: the pool either fills it or
+pays its assets back to the sender as one P2ID note tagged with the refund tag.
+The reserves and the protocol pot do not move on a refund. A limit note aborts
+before its deadline, so the node's transaction builder retries it later, and
+refunds at or after the deadline when it still cannot fill.
+
+The note script reads the refund tag. The reclaimer and reclaim height are carried
+in storage for the sender-side recovery path, which is not implemented.
+
 ## Mint
 
 On the first deposit the pool computes `root = isqrt(reserve0_after *
@@ -161,12 +184,21 @@ On later deposits the pool mints the smaller of `amount0 * lp_supply / reserve0`
 and `amount1 * lp_supply / reserve1`. The amount of each token used rounds up in
 the pool's favor with `div_ceil`; the remainder returns to the provider.
 
+The LP faucet's `token_config` supply is rewritten on every mint and burn to
+`lp_supply - MINIMUM_LIQUIDITY`, the circulating supply. The locked minimum is
+never an asset.
+
+A mint that misses, whether the assets are wrong, the deadline has passed, the
+arithmetic fails, or the liquidity is below `min_lp_out`, is refunded under the
+rule above.
+
 ## Burn
 
 For a burn of `amount` LP tokens, the pool returns `amount * reserve0 /
 lp_supply` of token0 and `amount * reserve1 / lp_supply` of token1, then reduces
-`lp_supply`. The burn reverts when `amount > lp_supply - MINIMUM_LIQUIDITY` and
-when either payout rounds to zero.
+`lp_supply`. A burn that asks for more than `lp_supply - MINIMUM_LIQUIDITY`, whose
+payout rounds to zero, or whose payout is below its minimum is refunded under the
+rule above.
 
 ## Swap
 
@@ -186,6 +218,10 @@ The full input enters the vault. The output leaves the vault. The reserve grows
 by `amount_in - protocol_fee`; the pool keeps the LP fee minus the protocol's
 share. The protocol fee is recorded in `protocol_pot`.
 
+A swap that misses, including an unknown asset, a zero output, an output at or
+above `reserve_out`, or an output below `min_amount_out`, is refunded under the
+rule above.
+
 ## quote_swap
 
 `quote_swap` runs the swap computation without modifying state. It returns the
@@ -202,11 +238,10 @@ The call is permissionless and the destination is not stored in the pool: it is
 read from the registry over foreign procedure invocation on the collect path, so
 it is rotated in one place.
 
-When the key is the chain fee asset, `collect` leaves a measured reserve in the
-vault for the transaction's own epilogue charge. The reserve is
-`POOL_COLLECT_FEE_HOLD` (126 base units) and `REGISTRY_COLLECT_FEE_HOLD` (119)
-for the registry, measured on the four-key path and stored in
-`contracts/collect-fee-hold.rs`, which both contracts include. The reserve
+When the key is the chain fee asset, `collect` leaves a reserve in the vault for
+the transaction's own epilogue charge. The reserve is the scheduled note price,
+`POOL_COLLECT_FEE_HOLD` 126 and `REGISTRY_COLLECT_FEE_HOLD` 126 base units,
+stored in `contracts/collect-fee-hold.rs`, which both contracts include. The reserve
 applies only when the transaction carries no FEE_SPONSORSHIP note: a sponsored
 collect reserves nothing and sweeps the whole balance. A collect note carries
 `[pool_id, serial, key...]`, calls `collect` once per key, and carries at most
@@ -289,9 +324,12 @@ Mint and burn products stay below `2^126`.
 
 ## Failure conditions
 
-Each procedure reverts under these conditions.
+A miss on a spot note is refunded, not reverted: the note is consumed and its
+assets return to the sender. A limit note aborts before its deadline and refunds
+at or after it. The lists below are the misses that trigger the refund, and the
+reverts that remain.
 
-Mint:
+Mint (refunded):
 
 - deposit missing one token
 - deposit plus reserve above `MAX_AMOUNT`
@@ -299,7 +337,7 @@ Mint:
 - later deposit mints zero liquidity
 - liquidity out below `min_lp_out`
 
-Burn:
+Burn (refunded):
 
 - note carries multiple assets or a non-LP asset
 - LP amount zero
@@ -309,7 +347,7 @@ Burn:
 - either payout rounds to zero
 - payout below its minimum
 
-Swap:
+Swap (refunded):
 
 - note carries multiple assets or an unknown asset
 - input zero

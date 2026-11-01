@@ -1,187 +1,45 @@
-# port0.sh
+# port0.sh contracts
 
-A constant-product automated market maker for the Miden rollup. A pool holds two
-fungible assets and enforces `x * y = k` between their reserves. Liquidity
-providers deposit both assets and receive LP tokens. Traders swap one asset for
-the other. A protocol fee accrues to the registry's protocol account.
-`ARCHITECTURE.md` describes the internal design.
+Constant-product AMM contracts for the port0.sh exchange on Miden: the pool
+account component, the registry account component, the network faucet component,
+and the note scripts that operate them.
+
+The consumer interface, the design, the fee model, and the security model are
+documented in the book at https://docs.port0.sh/contracts/overview.html.
+`ARCHITECTURE.md` in this repository carries the internal design.
 
 ## Components
 
 | Contract | Kind | Purpose |
-|----------|------|---------|
-| `port0` | account component | Pool: reserves, LP supply, fee accounting, oracle |
-| `pool-registry` | account component | Accepted pool code commitments, pool set, asset pair index, protocol fee policy, admin register fee |
-| `network-faucet` | account component | Fixed-supply token faucet: immutable owner, one launch, supply accounting |
+| --- | --- | --- |
+| `port0` | account component | Pool: reserves, LP supply, fee accounting, oracle, refunds |
+| `pool-registry` | account component | Pool set, accepted code commitments, fee policy, register fee |
+| `network-faucet` | account component | Fixed-supply token faucet: immutable owner, one launch |
 | `mint-note` | note script | Add liquidity |
 | `burn-note` | note script | Remove liquidity |
 | `swap-note` | note script | Trade |
-| `collect-note` | note script | Move a pool's accrued protocol fees to the protocol account |
-| `register-note` | note script | Register a pool in the registry |
-| `registry-collect-note` | note script | Move the registry's whole balance to the protocol account |
-| `registry-config-note` | note script | Change the registry's register fee, admin only |
-| `launch-note` | note script | Mint a network faucet's whole supply to a recipient, once |
+| `collect-note` | note script | Move a pool's protocol fees to the protocol account |
+| `register-note` | note script | Register a pool |
+| `registry-collect-note` | note script | Move the registry's balance to the protocol account |
+| `registry-config-note` | note script | Change the register fee, admin only |
+| `launch-note` | note script | Mint a network faucet's whole supply, once |
 
-A deployed pool account carries four components: `port0`, the standard basic
-fungible faucet component (the LP token's name, symbol, and decimals, so wallets
-can render it), the standard `CodeInspection` component (the registry reads
-`get_code_commitment` over FPI at registration), and the network auth component
-(note-script allowlist, fee schedule, and the `get_auth_identity` and
-`get_fee_identity` roots the registry pins). The SDK installs all four.
+## Build
 
-A pool is a public network account. An operation is a network note sent to the
-pool; the node's transaction builder consumes it and runs the pool procedure.
-Registration is a network note sent to the registry.
+Each contract is a standalone crate built with cargo-miden:
 
-## Network faucet
+```sh
+cargo miden build --manifest-path contracts/port0/Cargo.toml --release
+```
 
-A launched token is a fixed-supply token whose faucet is itself a network
-account. A regular faucet is keyed, and a gated network requires an allowlist
-entry before its first transaction; a network account is exempt, so launching a
-token needs no invitation.
+## Test
 
-The faucet account carries the `network-faucet` component, the standard basic
-fungible faucet component (name, symbol, decimals, and the maximum supply), and
-the network auth. Its component stores the immutable `owner` and a `launched`
-flag; the standard faucet's own minting procedure is unreachable because the
-account installs no mint policy.
+```sh
+cargo test -p integration --release
+```
 
-`launch(recipient, serial_num, tag)` mints the whole maximum supply once and pays
-it to `recipient` as a P2ID note. It requires the launch note's sender to equal
-the owner and the `launched` flag to be zero. The supply is read from the faucet
-configuration and written back as the token supply, so the faucet reports what it
-minted.
-
-## Lifecycle
-
-1. Create the pool account. Initial storage holds the two token asset keys, both
-   fee rates, the P2ID note root, and the registry pointer. The LP asset key is
-   derived from the pool's account id and is not stored.
-2. Fund the pool with a note and consume it as the pool's first transaction: a
-   network account requires every transaction to have an effect.
-3. The creator emits a register note; the registry verifies the pool and lists it.
-4. Liquidity providers emit mint and burn notes, traders emit swap notes, and the
-   fee recipient emits collect notes. Collects are permissionless.
-
-| Role | Note |
-| --- | --- |
-| Pool creator | `register` |
-| Liquidity provider | `mint`, `burn` |
-| Trader | `swap` |
-| Fee recipient | `collect`, `registry-collect` (both permissionless) |
-| Registry admin | `registry-config`, which changes the register fee only |
-| Token owner | `launch`, which mints a network faucet's supply once |
-
-## Notes
-
-The table lists each note, the assets it carries, and the felts it reads from
-note storage.
-
-| Note | Assets | Note storage (felts, in order) |
-|------|--------|-------------------------------|
-| mint-note | token0, token1 | pool id (2), recipient (2), serial (4), tag (1), deadline (1), min_lp_out (1) |
-| burn-note | LP token | pool id (2), recipient (2), serial (4), tag (1), deadline (1), min_amount0 (1), min_amount1 (1) |
-| swap-note | token0 or token1 | pool id (2), recipient (2), serial (4), tag (1), deadline (1), min_amount_out (1) |
-| collect-note | none | pool id (2), serial (4), then one asset key (4) per swept asset |
-| register-note | none | registry id (2), pool id (2), asset0 (2), asset1 (2) |
-| registry-collect-note | none | registry id (2), serial (4), then one asset key (4) per swept asset |
-| registry-config-note | none | registry id (2), new register fee (1), register note script root (4) |
-| launch-note | none | faucet id (2), recipient (2), serial (4), tag (1) |
-
-Account ids are two felts, prefix then suffix. `deadline` is a block timestamp;
-the note reverts if the pool executes it after that time. The `min_*` fields
-bound slippage. A collect note carries at most four asset keys.
-
-### mint-note
-
-Deposit token0 and token1. The pool mints LP tokens to the recipient. On the
-first mint the pool mints `sqrt(x * y)` LP tokens and retains
-`MINIMUM_LIQUIDITY = 1000` permanently; the provider receives the remainder. If
-the deposited ratio differs from the pool ratio, the pool refunds the excess of
-one token to the recipient.
-
-### burn-note
-
-Burn LP tokens. The pool returns a proportional share of both reserves to the
-recipient. The burn reverts when `amount_to_burn > lp_supply -
-MINIMUM_LIQUIDITY` and when either payout rounds to zero.
-
-### swap-note
-
-Send one token. The pool pays out the other token, less fees. `min_amount_out`
-reverts the trade if the output would be smaller.
-
-### collect-note
-
-Moves everything the pool's vault holds above its recorded reserves for each
-named asset key to the protocol account the registry designates. For token0 and
-token1 that is the protocol pot plus any credit outside the reserves, and the
-pot is reset; for any other key it is the whole balance, so a third asset sent
-to the pool is recoverable. Permissionless: the destination is fixed in the
-registry, so a caller can only flush value toward it. When the key is the chain
-fee asset, the transaction's own fee reserve stays in the vault unless the
-transaction carries a sponsorship note.
-
-### register-note
-
-Registers the pool in the registry. The note targets the registry account and
-carries the registry id, the pool id, and the two token faucet ids in note
-storage. The registry's `register` procedure calls the pool's
-`CodeInspection::get_code_commitment`, `get_registry_identity`,
-`get_auth_identity`, and `get_fee_identity` by foreign procedure invocation. It
-rejects a commitment that is not accepted, a pool id or asset pair that is
-already registered, a pool that points at a different registry, a pool whose
-token keys do not match the claimed pair, a pool whose protocol fee rate differs
-from the registry's, a pool whose LP fee is not an allowed tier, a payout root
-that differs from the registry's P2ID root, and a pool whose auth or fee storage
-roots differ from the values the registry was created with.
-
-### registry-collect-note
-
-Moves the registry's whole balance of each named asset to the protocol account.
-The note carries the registry id, a serial, and one four-felt asset key per
-swept asset, at most four. Like a pool collect, it is permissionless and the
-destination is fixed in storage.
-
-### launch-note
-
-Targets a network faucet and calls its `launch`, which mints the faucet's whole
-maximum supply once to the recipient named in note storage. The faucet checks
-the note's sender against its immutable owner, so a launch note from any other
-account aborts. The note carries no assets.
-
-## Quoting a swap
-
-`quote_swap` is an account procedure callable by foreign procedure invocation.
-It returns the amount out, the resulting reserves, and the protocol fee for a
-given input without moving assets.
-
-## Fees
-
-A pool is created with two basis-point values, fixed for its lifetime:
-
-| Value | Meaning |
-|-------|---------|
-| `lp_fee_bps` | The fee a swapper pays. |
-| `protocol_fee_share_bps` | The protocol's share of that fee, in basis points of it. `1200` means 12% of the LP fee. |
-
-The share is carved out of the LP fee, not added to the swapper's cost. A swap
-computes `lp_fee = amount_in * lp_fee_bps / 10000` and
-`protocol_fee = lp_fee * protocol_fee_share_bps / 10000`; the pool's reserve
-grows by `amount_in - protocol_fee`, the pot grows by `protocol_fee`, and the
-output is computed from the full input with the LP fee weight. The swapper
-therefore pays the LP fee tier and nothing more. Uniswap V2 uses a share of
-1667 (1/6); PancakeSwap uses 1200 (3/25). `lp_fee_bps` must be below 10000.
-
-## Limits
-
-- Amounts, reserves, and LP supply are u64 values capped at
-  `MAX_AMOUNT = 2^57`. The cap keeps every u128 intermediate, including the
-  swap numerator, below `u128::MAX`.
-- A collect note carries at most four asset keys. The collect scripts reject a
-  longer list, so the fee schedule price covers the largest accepted sweep.
-- The price oracle (cumulative prices and the last block timestamp) updates on
-  mint, burn, and swap, and saturates the accumulators at `u128::MAX`.
+Tests run against MockChain, which compiles the contracts and executes the note
+flows without a network.
 
 ## Repository layout
 
@@ -189,6 +47,7 @@ therefore pays the LP fee tier and nothing more. Uniswap V2 uses a share of
 contracts/
   port0/                    pool account component
   pool-registry/            registry account component
+  network-faucet/           fixed-supply token faucet component
   mint-note/                add-liquidity note script
   burn-note/                remove-liquidity note script
   swap-note/                swap note script
@@ -196,27 +55,11 @@ contracts/
   register-note/            pool registration note script
   registry-collect-note/    registry fee collection note script
   registry-config-note/     register fee configuration note script
-  network-faucet/           fixed-supply token faucet component
   launch-note/              network faucet launch note script
-integration/                MockChain integration tests and deployment binaries
+  collect-fee-hold.rs       shared collect fee reserve, included by both accounts
+  token-config-slot.rs      shared faucet token config slot id
+integration/                MockChain tests and deployment binaries
 ```
-
-## Build
-
-Each contract is a standalone crate built with cargo-miden:
-
-```
-cargo miden build --manifest-path contracts/port0/Cargo.toml --release
-```
-
-## Test
-
-```
-cargo test -p integration --release
-```
-
-Tests run against MockChain, an in-process chain that compiles the contracts and
-executes the note flows without a network.
 
 ## Source
 
